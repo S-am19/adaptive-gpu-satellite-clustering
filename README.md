@@ -108,3 +108,73 @@ Runs record the actual GPU, compute capability, CUDA driver/NVRTC versions,
 Python/package versions, configuration, reduction policy and estimated buffer
 bytes. Warm kernels explicitly before any later steady-state benchmarking;
 atomic contention, float64 throughput and monitoring overhead remain unoptimized.
+
+## Synthetic CPU/CUDA pilot benchmark
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B experiments/benchmark_cuda.py
+```
+
+The runner configures the WSL2 driver path by re-executing its own process when
+needed; native Ubuntu keeps normal driver discovery. It uses real CUDA hardware.
+Defaults are N=1,024/8,192, D=4/14, K=4/16, seeds 0/1/2, one complete warm-up per
+method per case, then five measured repeats. Each pair uses identical float32
+arrays, sampled initial centroids and configuration (`max_steps=30`, `tolerance=1e-6`).
+Dataset sizes increase in order, with conservative RAM/VRAM checks and a 120-second
+budget checked between repeats/cases. This budget cannot interrupt an active fit.
+Larger experiment matrices require a separate decision; defaults are only a pilot.
+
+External `perf_counter` measurements cover the same complete `fit()` boundary,
+including validation, allocations, final labeling, metadata and GPU transfers.
+Previous GPU work is synchronized before either timer; `fit_cuda` itself completes
+device work before returning. Generation, initialization, output verification,
+explicit `gc.collect()` and file writes are outside both timers. Automatic garbage
+collection remained enabled during the completed pilot and may run inside timed
+fits. The runner does not disable it; future manifests record its initial state.
+Method order alternates
+per repeat, with seed-dependent starting order. Warm-up rows are saved but excluded
+from summaries. Small-grid occupancy hints alone are suppressed during the runner;
+other warnings are recorded. No algorithms or instrumentation are altered.
+
+Raw CSV, per-case summary CSV, and a JSON manifest are saved in a unique directory
+under `/tmp/pcap-benchmarks/` by default. `--output-dir PATH` selects a new directory;
+keep generated results outside Git. Artifacts include seeds, data/C0 hashes, source
+hashes, Git state, hardware/tool versions, warnings, final SSE, iterations and
+termination reasons. Summaries report medians, quartiles, IQR, standard deviation
+and min/max across repeats **separately for each seed**.
+
+Future schema-version-2 raw rows also record final centroid displacement and
+`convergence_satisfied`, calculated directly as displacement <= tolerance. Each
+method's summary records iteration counts, termination reasons, whether all repeats
+satisfied the criterion, how many did, and maximum final displacement. Reaching
+`max_steps` alone does not prove non-convergence: a run can satisfy tolerance on
+that last step. `quality_valid` means the pair passed quality/matched-work checks;
+it does not mean convergence. Existing pilot CSV/JSON files are not rewritten.
+
+End-to-end speedup is CPU external median / GPU external median. Internal GPU
+`compute_s`, CUDA-event intervals and transfer-related timings are separate
+diagnostics with overlapping scopes; they are not added together or used as an
+end-to-end speedup denominator. In particular, GPU `compute_s` includes host
+monitoring/scalar transfers and `kernel_s` includes inter-launch gaps. Full-fit
+timings retain instrumentation and metadata overhead, and exclude process startup
+and JIT warm-up. Warming each case also warms data/allocator caches; this is not a
+cold-start or pure-kernel benchmark. Clock/thermal variation is not controlled.
+
+Every pair is checked outside timing for final exact labels/SSE, CPU/GPU SSE and
+centroid agreement, identical iteration counts/termination and unchanged inputs.
+A failed gate is saved and stops the run; no speedup is reported for invalid pairs.
+The three-seed pilot does not replace the plan's larger five-seed final experiments.
+
+The original main pilot is preserved byte-for-byte under
+`~/pcap-benchmark-archive/20261020T174112.839285Z/`, with a SHA256 inventory and
+separate provenance notes. Its pre-warning-fix runner was reconstructed and verified
+against the saved source hash. The archive also includes the associated algorithm
+sources and a **post-run** dependency snapshot; unrecorded original transitive
+package versions cannot be established retrospectively. Keep the original manifest
+and CSVs unchanged when copying archives; record later annotations separately.
+
+An audit of the original raw rows confirms two limit-terminated cases:
+`n8192_d14_k4_seed0` and `n8192_d14_k4_seed1`. Each has five CPU and five GPU
+measurements at 30 steps: 20 measured rows total. There is no discrepancy with the
+earlier report of two cases. Historical non-convergence follows the recorded
+termination reason; those original rows did not save final centroid displacement.
