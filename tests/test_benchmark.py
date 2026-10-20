@@ -144,3 +144,214 @@ def test_summary_reports_mixed_convergence_and_excludes_warmups():
         assert json.loads(summary[f"{method}_termination_reasons"]) == ["max_steps", "tolerance"]
         assert summary[f"{method}_converged_repeats"] == 4
         assert summary[f"{method}_convergence_satisfied"] is False
+
+
+def test_interleaved_schedule_balances_sizes_methods_and_warms_first():
+    args = benchmark.parse_args(["--sizes", "8192", "32768", "--dimensions", "14",
+                                 "--clusters", "16", "--seeds", "0", "--warmups", "2",
+                                 "--interleave-sizes"])
+    schedule = list(benchmark.case_schedule(args))
+    assert len(schedule) == 14
+    assert all(phase == "warmup" for _, phase, _, _ in schedule[:4])
+    assert all(phase == "measured" for _, phase, _, _ in schedule[4:])
+    for repeat in range(5):
+        round_ = schedule[4 + 2 * repeat:6 + 2 * repeat]
+        assert [case[0] for case, _, _, _ in round_] == (
+            [8192, 32768] if repeat % 2 == 0 else [32768, 8192])
+        assert round_[0][3] != round_[1][3]
+    for n in (8192, 32768):
+        rows = [row for row in schedule if row[0][0] == n]
+        assert sum(row[1] == "warmup" for row in rows) == 2
+        measured = [row for row in rows if row[1] == "measured"]
+        assert sorted(row[2] for row in measured) == list(range(5))
+        assert sum(row[3][0] == "cpu" for row in measured) in (2, 3)
+
+
+def test_default_schedule_preserves_case_major_order():
+    args = benchmark.parse_args(["--sizes", "8192", "32768", "--dimensions", "14",
+                                 "--clusters", "16", "--seeds", "0"])
+    schedule = list(benchmark.case_schedule(args))
+    assert [row[0][0] for row in schedule] == [8192] * 6 + [32768] * 6
+
+
+@pytest.fixture
+def mocked_runner(monkeypatch, tmp_path):
+    """Exercise runner I/O and control flow without CUDA or measured algorithms."""
+    import sys
+    import types
+    import weakref
+    from numba import cuda
+    import pcap.kmeans_cpu as cpu_module
+
+    monkeypatch.setattr(benchmark, '_configure_process', lambda: None)
+    monkeypatch.setattr(benchmark, '_command', lambda args: {'returncode': 0, 'stdout': ''})
+    monkeypatch.setattr(benchmark, '_available_ram', lambda: 10**8)
+    monkeypatch.setattr(benchmark.gc, 'collect', lambda: None)
+    monkeypatch.setattr(cuda.config, 'ENABLE_CUDASIM', False)
+    monkeypatch.setattr(cuda, 'is_available', lambda: True)
+    monkeypatch.setattr(cuda, 'synchronize', lambda: None)
+    monkeypatch.setattr(cuda, 'current_context', lambda: types.SimpleNamespace(
+        get_memory_info=lambda: (10**8, 10**8)))
+    clock = [0.0]
+    monkeypatch.setattr(benchmark, 'perf_counter', lambda: clock[0])
+    references, live_at_load = [], []
+
+    def generate(n, d, k, seed):
+        live_at_load.append(sum(ref() is not None for ref in references))
+        points = np.zeros((n, d), dtype=np.float32)
+        references.append(weakref.ref(points))
+        return points
+
+    calls = []
+    fail_at = [None]
+
+    def fit(points, initial, config):
+        calls.append(len(points))
+        clock[0] += 0.001
+        if len(calls) == fail_at[0]:
+            raise RuntimeError('injected fit failure')
+        return RunResult(initial.copy(), np.zeros(len(points), dtype=np.int32),
+                         [{'centroid_displacement': 0.0}],
+                         {key: 0.001 for key in benchmark.TIMING_KEYS},
+                         {'steps': 1, 'termination_reason': 'tolerance', 'final_exact_sse': 0.0})
+
+    monkeypatch.setattr(benchmark, 'make_synthetic', generate)
+    monkeypatch.setattr(cpu_module, 'fit_cpu', fit)
+    monkeypatch.setitem(sys.modules, 'pcap.kmeans_cuda', types.SimpleNamespace(fit_cuda=fit))
+    args = ['--sizes', '8', '16', '--dimensions', '2', '--clusters', '1', '--seeds', '0',
+            '--output-dir', str(tmp_path / 'artifacts')]
+    return types.SimpleNamespace(args=args, output=tmp_path / 'artifacts', clock=clock,
+                                 references=references, live_at_load=live_at_load,
+                                 calls=calls, fail_at=fail_at)
+
+
+def read_runner_artifacts(run):
+    import csv
+    manifest = json.loads((run.output / 'manifest.json').read_text())
+    raw = list(csv.DictReader((run.output / 'raw.csv').open()))
+    path = run.output / 'summary.csv'
+    summaries = list(csv.DictReader(path.open())) if path.exists() else []
+    return manifest, raw, summaries
+
+
+@pytest.mark.parametrize('interleaved', [False, True])
+@pytest.mark.parametrize('failure', ['timeout', 'exception'])
+def test_completed_summary_survives_interruption(monkeypatch, mocked_runner, interleaved, failure):
+    run = mocked_runner
+    original = benchmark.case_schedule
+
+    def interrupted(args):
+        completed = False
+        for entry in original(args):
+            if completed:
+                if failure == 'exception':
+                    raise RuntimeError('injected schedule failure')
+                run.clock[0] = 121.0
+            yield entry
+            _, phase, repeat, _ = entry
+            if phase == 'measured' and repeat == args.repeats - 1:
+                completed = True
+
+    # Manifest schedule enumeration must not trigger the injected execution failure.
+    invocations = [0]
+    def schedule(args):
+        invocations[0] += 1
+        return original(args) if invocations[0] == 1 else interrupted(args)
+    monkeypatch.setattr(benchmark, 'case_schedule', schedule)
+    with pytest.raises(TimeoutError if failure == 'timeout' else RuntimeError):
+        benchmark.main(run.args + (['--interleave-sizes'] if interleaved else []))
+    manifest, raw, summaries = read_runner_artifacts(run)
+    assert manifest['status'] == 'failed'
+    assert manifest['completed_cases'] == len(summaries) == 1
+    completed_id = summaries[0]['case_id']
+    assert len([row for row in raw if row['case_id'] == completed_id]) == 12
+    if interleaved:
+        incomplete = [row for row in raw if row['case_id'] != completed_id]
+        assert len(incomplete) == 10
+        assert sum(row['phase'] == 'measured' for row in incomplete) == 8
+
+
+@pytest.mark.parametrize('interleaved', [False, True])
+def test_mid_pair_failure_preserves_partial_raw_without_completion(mocked_runner, interleaved):
+    run = mocked_runner
+    run.fail_at[0] = 4  # One full pair, then one successful call before failure.
+    with pytest.raises(RuntimeError, match='injected fit failure'):
+        benchmark.main(run.args + (['--interleave-sizes'] if interleaved else []))
+    manifest, raw, summaries = read_runner_artifacts(run)
+    assert manifest['completed_cases'] == 0 and summaries == []
+    assert len(raw) == 3
+    assert raw[-1]['quality_valid'] == 'False'
+    assert json.loads(raw[-1]['quality_json']) == {'pair_incomplete': True}
+
+
+@pytest.mark.parametrize('interleaved,expected_live', [(False, [0, 0]), (True, [0, 1])])
+def test_dataset_lifetime_and_completed_artifacts(mocked_runner, interleaved, expected_live):
+    run = mocked_runner
+    benchmark.main(run.args + (['--interleave-sizes'] if interleaved else []))
+    manifest, raw, summaries = read_runner_artifacts(run)
+    assert manifest['status'] == 'complete' and manifest['completed_cases'] == 2
+    assert len(summaries) == 2 and len(raw) == 24
+    assert manifest['final_cuda_memory_info'] == [10**8, 10**8]
+    assert 'final_cuda_memory_error' not in manifest
+    assert run.live_at_load == expected_live
+    assert all(ref() is None for ref in run.references)
+    assert all(row['repeats'] == '5' for row in summaries)
+
+
+def test_interleaved_memory_guard_counts_retained_cases(monkeypatch, mocked_runner):
+    run = mocked_runner
+    # Each case fits individually under 2500 bytes; their summed estimates do not.
+    monkeypatch.setattr(benchmark, '_available_ram', lambda: 10000)
+    with pytest.raises(MemoryError, match='RAM budget'):
+        benchmark.main(run.args + ['--interleave-sizes'])
+    manifest, raw, summaries = read_runner_artifacts(run)
+    assert manifest['completed_cases'] == 0 and summaries == []
+    assert len(run.references) == 1 and len(raw) == 2
+
+
+@pytest.mark.parametrize('interleaved', [False, True])
+def test_cleanup_cuda_failure_preserves_original_error_and_artifacts(monkeypatch, mocked_runner, interleaved):
+    from numba import cuda
+    run = mocked_runner
+    # Fail the second call of a pair, after one case has fully completed.
+    run.fail_at[0] = 24 if interleaved else 14
+    original_context = cuda.current_context
+
+    def context():
+        if len(run.calls) >= run.fail_at[0]:
+            raise RuntimeError('CUDA context unavailable during cleanup')
+        return original_context()
+
+    monkeypatch.setattr(cuda, 'current_context', context)
+    with pytest.raises(RuntimeError, match='^injected fit failure$'):
+        benchmark.main(run.args + (['--interleave-sizes'] if interleaved else []))
+    manifest, raw, summaries = read_runner_artifacts(run)
+    assert manifest['status'] == 'failed'
+    assert manifest['error'] == 'RuntimeError: injected fit failure'
+    assert manifest['completed_cases'] == len(summaries) == 1
+    assert manifest['final_cuda_memory_info'] is None
+    assert manifest['final_cuda_memory_error'] == 'RuntimeError: CUDA context unavailable during cleanup'
+    assert len(raw) == run.fail_at[0] - 1
+    assert raw[-1]['quality_valid'] == 'False'
+    assert json.loads(raw[-1]['quality_json']) == {'pair_incomplete': True}
+    assert len([row for row in raw if row['case_id'] == summaries[0]['case_id']]) == 12
+
+
+def test_successful_run_survives_unavailable_final_memory_reading(monkeypatch, mocked_runner):
+    from numba import cuda
+    run = mocked_runner
+    original_context = cuda.current_context
+
+    def context():
+        if len(run.calls) == 24:
+            raise RuntimeError('final memory reading unavailable')
+        return original_context()
+
+    monkeypatch.setattr(cuda, 'current_context', context)
+    assert benchmark.main(run.args) == run.output
+    manifest, raw, summaries = read_runner_artifacts(run)
+    assert manifest['status'] == 'complete' and 'error' not in manifest
+    assert manifest['completed_cases'] == len(summaries) == 2
+    assert len(raw) == 24
+    assert manifest['final_cuda_memory_info'] is None
+    assert manifest['final_cuda_memory_error'] == 'RuntimeError: final memory reading unavailable'

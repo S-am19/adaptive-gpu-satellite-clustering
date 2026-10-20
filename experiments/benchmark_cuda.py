@@ -5,6 +5,7 @@ Results default to a unique directory under /tmp/pcap-benchmarks, outside Git.
 """
 
 import argparse
+import itertools
 import csv
 from datetime import datetime, timezone
 import gc
@@ -172,6 +173,27 @@ def _positive(value):
     return value
 
 
+def case_schedule(args):
+    """Yield (case, phase, repeat, CPU/GPU order); interleave outside timers."""
+    cases = list(itertools.product(sorted(set(args.sizes)), sorted(set(args.dimensions)),
+                                   sorted(set(args.clusters)), dict.fromkeys(args.seeds)))
+    phases = (("warmup", args.warmups), ("measured", args.repeats))
+    if args.interleave_sizes:
+        for phase, count in phases:
+            for repeat in range(count):
+                ordered = cases if repeat % 2 == 0 else list(reversed(cases))
+                for case in ordered:
+                    index = cases.index(case)
+                    order = ("cpu", "gpu") if (repeat + case[3] + index) % 2 == 0 else ("gpu", "cpu")
+                    yield case, phase, repeat, order
+    else:
+        for case in cases:
+            for phase, count in phases:
+                for repeat in range(count):
+                    order = ("cpu", "gpu") if (repeat + case[3]) % 2 == 0 else ("gpu", "cpu")
+                    yield case, phase, repeat, order
+
+
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sizes", nargs="+", type=_positive, default=[1024, 8192])
@@ -184,6 +206,8 @@ def parse_args(argv=None):
     parser.add_argument("--tolerance", type=float, default=1e-6)
     parser.add_argument("--budget-seconds", type=_positive, default=120)
     parser.add_argument("--output-dir", type=Path)
+    parser.add_argument("--interleave-sizes", action="store_true",
+                        help="warm all cases first, then alternate case order each measured round")
     args = parser.parse_args(argv)
     if args.repeats < 5:
         parser.error("at least five measured repeats are required")
@@ -222,9 +246,10 @@ def main(argv=None):
         "python": sys.version, "python_executable": sys.executable, "platform": platform.platform(),
         "cpu_model": model_lines[0].split(':', 1)[1].strip() if model_lines else platform.processor(),
         "logical_cpus": os.cpu_count(), "available_ram_bytes": _available_ram(),
+        "initial_cuda_memory_info": list(cuda.current_context().get_memory_info()),
         "git_commit": _command(["git", "rev-parse", "HEAD"]),
         "git_status": _command(["git", "status", "--short"]),
-        "nvidia_smi": _command(["nvidia-smi", "--query-gpu=name,uuid,driver_version,memory.total,pstate,temperature.gpu,power.draw",
+        "nvidia_smi": _command(["nvidia-smi", "--query-gpu=name,uuid,driver_version,memory.total,memory.free,memory.used,pstate,temperature.gpu,power.draw,clocks.sm,clocks.mem,utilization.gpu",
                                  "--format=csv,noheader,nounits"]),
         "nvcc": _command(["nvcc", "--version"]),
         "source_sha256": {name: hashlib.sha256((ROOT / name).read_bytes()).hexdigest()
@@ -244,7 +269,12 @@ def main(argv=None):
     }
     manifest_path = output / "manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2, default=str) + "\n")
+    manifest["schedule"] = [{"case": case, "phase": phase, "repeat": repeat, "order": order}
+                            for case, phase, repeat, order in case_schedule(args)]
+    manifest_path.write_text(json.dumps(manifest, indent=2, default=str) + "\n")
     summaries = []
+    states = {}
+    host_budget = 0.25 * manifest["available_ram_bytes"]
     print(f"Artifacts: {output}", flush=True)
     print("External full-fit medians and IQR; speedup = CPU median / GPU median", flush=True)
 
@@ -256,75 +286,86 @@ def main(argv=None):
         with (output / "raw.csv").open("x", newline="") as handle:
             writer = csv.DictWriter(handle, fieldnames=RAW_FIELDS)
             writer.writeheader()
-            for n in sorted(set(args.sizes)):
-                for d in sorted(set(args.dimensions)):
-                    for k in sorted(set(args.clusters)):
-                        for seed in dict.fromkeys(args.seeds):
-                            check_budget()
-                            host_estimate = 32 * n * d + 64 * n + 32 * k * d
-                            device_estimate = 4 * n * d + 12 * n + 12 * k * d + 16 * k + 65536
-                            if host_estimate > 0.25 * _available_ram():
-                                raise MemoryError("Case exceeds conservative pilot RAM budget")
-                            if device_estimate > 0.5 * cuda.current_context().get_memory_info()[0]:
-                                raise MemoryError("Case exceeds conservative pilot VRAM budget")
-                            points = make_synthetic(n, d, k, seed)
-                            initial = initialize_centroids(points, k, seed=seed)
-                            config = FitConfig(k, seed, args.max_steps, args.tolerance)
-                            data_hash, initial_hash = array_hash(points), array_hash(initial)
-                            case_id = f"n{n}_d{d}_k{k}_seed{seed}"
-                            case_rows = []
-                            for phase, count in (("warmup", args.warmups), ("measured", args.repeats)):
-                                for repeat in range(count):
-                                    check_budget()
-                                    order = ("cpu", "gpu") if (repeat + seed) % 2 == 0 else ("gpu", "cpu")
-                                    pair, rows = {}, []
-                                    for position, method in enumerate(order):
-                                        gc.collect()
-                                        cuda.synchronize()  # Drain previous work outside either method's timer.
-                                        fit = fit_cpu if method == "cpu" else fit_cuda
-                                        measured_at = datetime.now(timezone.utc).isoformat()
-                                        with warnings.catch_warnings(record=True) as observed:
-                                            warnings.filterwarnings("ignore", message="Grid size .*GPU under-utilization.*",
-                                                                    category=NumbaPerformanceWarning)
-                                            start = perf_counter()
-                                            result = fit(points, initial, config)
-                                            elapsed = perf_counter() - start
-                                        pair[method] = result
-                                        rows.append({
-                                            "timestamp_utc": measured_at,
-                                            "case_id": case_id, "phase": phase, "repeat": repeat,
-                                            "method": method, "order": position, "n": n, "d": d, "k": k,
-                                            "seed": seed, "max_steps": args.max_steps, "tolerance": args.tolerance,
-                                            "data_sha256": data_hash, "initial_sha256": initial_hash,
-                                            "external_fit_s": elapsed, "sse": result.sse, "sse_per_point": result.sse / n,
-                                            "steps": result.metadata["steps"],
-                                            "termination_reason": result.metadata["termination_reason"],
-                                            **_convergence_fields(result, config.tolerance),
-                                            "warnings_json": json.dumps([str(item.message) for item in observed]),
-                                            "metadata_json": json.dumps(result.metadata, sort_keys=True),
-                                            **{key: result.timings.get(key, "") for key in TIMING_KEYS},
-                                        })
-                                    valid, checks = verify_quality(points, pair["cpu"], pair["gpu"], assign_exact)
-                                    checks["inputs_unchanged"] = (array_hash(points) == data_hash
-                                                                   and array_hash(initial) == initial_hash)
-                                    valid = valid and checks["inputs_unchanged"]
-                                    for row in rows:
-                                        row.update(quality_valid=valid, quality_json=json.dumps(checks, sort_keys=True))
-                                        writer.writerow(row)
-                                    handle.flush()
-                                    case_rows.extend(rows)
-                                    if not valid:
-                                        raise RuntimeError(f"Quality/matched-work check failed: {case_id}: {checks}")
-                            summary = summarize(case_rows)
-                            summaries.append(summary)
-                            print(f"{case_id}: CPU {summary['cpu_median_s']*1000:.3f} ms "
-                                  f"(IQR {summary['cpu_iqr_s']*1000:.3f}); "
-                                  f"GPU {summary['gpu_median_s']*1000:.3f} ms "
-                                  f"(IQR {summary['gpu_iqr_s']*1000:.3f}); "
-                                  f"speedup {summary['end_to_end_speedup']:.3f}x; "
-                                  f"steps {summary['steps_min']}..{summary['steps_max']}; "
-                                  f"criterion satisfied CPU={summary['cpu_convergence_satisfied']} "
-                                  f"GPU={summary['gpu_convergence_satisfied']}", flush=True)
+            for case, phase, repeat, order in case_schedule(args):
+                check_budget()
+                n, d, k, seed = case
+                if case not in states:
+                    host_estimate = 32 * n * d + 64 * n + 32 * k * d
+                    device_estimate = 4 * n * d + 12 * n + 12 * k * d + 16 * k + 65536
+                    retained_estimate = sum(32 * c[0] * c[1] + 64 * c[0] + 32 * c[2] * c[1]
+                                            for c in states)
+                    if (retained_estimate + host_estimate > host_budget
+                            or host_estimate > 0.25 * _available_ram()):
+                        raise MemoryError("Case exceeds conservative pilot RAM budget")
+                    if device_estimate > 0.5 * cuda.current_context().get_memory_info()[0]:
+                        raise MemoryError("Case exceeds conservative pilot VRAM budget")
+                    points = make_synthetic(n, d, k, seed)
+                    initial = initialize_centroids(points, k, seed=seed)
+                    config = FitConfig(k, seed, args.max_steps, args.tolerance)
+                    data_hash, initial_hash = array_hash(points), array_hash(initial)
+                    case_id = f"n{n}_d{d}_k{k}_seed{seed}"
+                    states[case] = (points, initial, config, data_hash, initial_hash, case_id, [])
+                points, initial, config, data_hash, initial_hash, case_id, case_rows = states[case]
+                pair, rows = {}, []
+                try:
+                    for position, method in enumerate(order):
+                        gc.collect()
+                        cuda.synchronize()  # Drain previous work outside either method's timer.
+                        fit = fit_cpu if method == "cpu" else fit_cuda
+                        measured_at = datetime.now(timezone.utc).isoformat()
+                        with warnings.catch_warnings(record=True) as observed:
+                            warnings.filterwarnings("ignore", message="Grid size .*GPU under-utilization.*",
+                                                    category=NumbaPerformanceWarning)
+                            start = perf_counter()
+                            result = fit(points, initial, config)
+                            elapsed = perf_counter() - start
+                        pair[method] = result
+                        rows.append({
+                            "timestamp_utc": measured_at,
+                            "case_id": case_id, "phase": phase, "repeat": repeat,
+                            "method": method, "order": position, "n": n, "d": d, "k": k,
+                            "seed": seed, "max_steps": args.max_steps, "tolerance": args.tolerance,
+                            "data_sha256": data_hash, "initial_sha256": initial_hash,
+                            "external_fit_s": elapsed, "sse": result.sse, "sse_per_point": result.sse / n,
+                            "steps": result.metadata["steps"],
+                            "termination_reason": result.metadata["termination_reason"],
+                            **_convergence_fields(result, config.tolerance),
+                            "warnings_json": json.dumps([str(item.message) for item in observed]),
+                            "metadata_json": json.dumps(result.metadata, sort_keys=True),
+                            **{key: result.timings.get(key, "") for key in TIMING_KEYS},
+                        })
+                    valid, checks = verify_quality(points, pair["cpu"], pair["gpu"], assign_exact)
+                    checks["inputs_unchanged"] = (array_hash(points) == data_hash
+                                                   and array_hash(initial) == initial_hash)
+                    valid = valid and checks["inputs_unchanged"]
+                except Exception:
+                    # Keep successful calls from an interrupted pair, without claiming validation.
+                    for row in rows:
+                        row.update(quality_valid=False, quality_json=json.dumps({"pair_incomplete": True}))
+                        writer.writerow(row)
+                    handle.flush()
+                    raise
+                for row in rows:
+                    row.update(quality_valid=valid, quality_json=json.dumps(checks, sort_keys=True))
+                    writer.writerow(row)
+                handle.flush()
+                case_rows.extend(rows)
+                if not valid:
+                    raise RuntimeError(f"Quality/matched-work check failed: {case_id}: {checks}")
+                if phase == "measured" and repeat == args.repeats - 1:
+                    summary = summarize(case_rows)
+                    summaries.append(summary)
+                    print(f"{summary['case_id']}: CPU {summary['cpu_median_s']*1000:.3f} ms "
+                          f"(IQR {summary['cpu_iqr_s']*1000:.3f}); "
+                          f"GPU {summary['gpu_median_s']*1000:.3f} ms "
+                          f"(IQR {summary['gpu_iqr_s']*1000:.3f}); "
+                          f"speedup {summary['end_to_end_speedup']:.3f}x; "
+                          f"steps {summary['steps_min']}..{summary['steps_max']}; "
+                          f"criterion satisfied CPU={summary['cpu_convergence_satisfied']} "
+                          f"GPU={summary['gpu_convergence_satisfied']}", flush=True)
+                    del states[case]
+                # Drop loop-local array/result references before loading the next case.
+                del points, initial, config, pair, result, case_rows
         manifest["status"] = "complete"
     except Exception as exc:
         manifest["status"] = "failed"
@@ -338,7 +379,14 @@ def main(argv=None):
                 writer.writerows(summaries)
         manifest["completed_cases"] = len(summaries)
         manifest["elapsed_s"] = perf_counter() - started
-        manifest["final_nvidia_smi"] = _command(["nvidia-smi"])
+        manifest["final_available_ram_bytes"] = _available_ram()
+        try:
+            manifest["final_cuda_memory_info"] = list(cuda.current_context().get_memory_info())
+        except Exception as exc:
+            # Diagnostics must not mask a fit failure or prevent its manifest being saved.
+            manifest["final_cuda_memory_info"] = None
+            manifest["final_cuda_memory_error"] = f"{type(exc).__name__}: {exc}"
+        manifest["final_nvidia_smi"] = _command(["nvidia-smi", "--query-gpu=name,uuid,driver_version,memory.total,memory.free,memory.used,pstate,temperature.gpu,power.draw,clocks.sm,clocks.mem,utilization.gpu", "--format=csv,noheader,nounits"])
         manifest_path.write_text(json.dumps(manifest, indent=2, default=str) + "\n")
     return output
 
