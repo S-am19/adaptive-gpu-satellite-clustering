@@ -271,3 +271,57 @@ projected coordinates with recognised metre-based horizontal units and unit
 conversion factor 1. Geographic, feet-based and unknown CRS/unit definitions
 are rejected; 10 m affine pixel size is checked separately. Equivalent EPSG/WKT
 definitions are compared by parsed CRS equality, not raw string matching.
+
+## Fixed CPU Mini-Batch K-Means
+
+`pcap.minibatch.fit_minibatch_cpu(X, C0, config)` returns the existing `RunResult`
+using exact sequential CPU batch assignment. It has no CUDA, HNSW or Rasterio
+imports and does not modify the full Lloyd CPU/CUDA baselines.
+
+```python
+from pcap.contracts import FitConfig
+from pcap.minibatch import fit_minibatch_cpu
+
+config = FitConfig(k=len(C0), seed=0, max_steps=100, tolerance=1e-6,
+                   batch_size=32, probe_interval=10)
+result = fit_minibatch_cpu(X, C0, config)
+```
+
+`batch_size` must be in 1..N and `ann_effort` must be None. The RNG draws a
+uniform sample without replacement inside each update; rows may recur across
+updates. For batch_size=N, all input rows are used in input order. A separate
+seeded RNG chooses the fixed stopping probe, so changing probe cadence does not
+change batch draws. Seeds reproduce results within the recorded NumPy/Numba
+environment; initial centroids remain caller-provided and are not observations.
+
+Float64 sums and int64 per-cluster observation counts persist across updates.
+Every point is assigned against the pre-update centroids. For a cluster with
+new observations, its centroid becomes the cumulative observation sum divided
+by cumulative count, rounded to float32. Clusters receiving no batch points
+retain their centroids. This is a running Mini-Batch update, not ordinary Lloyd
+K-Means repeated on samples; even batch_size=N differs from Lloyd after the
+first update because observation counts persist.
+
+Stopping checks occur every `probe_interval` updates. Three consecutive checks
+must have maximum centroid movement since the previous checkpoint <= tolerance
+and unchanged exact labels on the fixed probe of up to 1024 input rows. The
+probe overlaps training data: this is a heuristic stopping diagnostic, not
+held-out validation or proof of full-data convergence. If the cap arrives first,
+termination is `max_steps`; an unchanged single random batch cannot stop a fit.
+An unstable checkpoint resets the consecutive stable count. If the third stable
+checkpoint occurs exactly at `max_steps`, termination is `tolerance`; reaching
+the cap without that third check remains `max_steps`. These reasons describe
+the probe heuristic, not guaranteed full-data convergence.
+
+History records pre-update `batch_sse_before_update`, batch movement, cumulative
+observations and, at checkpoints, post-update `probe_sse`, checkpoint movement
+and probe label changes. Neither objective is full-dataset SSE, and neither is
+required to decrease. At completion, one exact full-data assignment sets labels
+and `metadata['final_exact_sse']`, which is the value exposed by `result.sse`.
+
+Sampling, batch assignment, accumulation/update, monitoring and final assignment
+have separate host timings. They are subsets of `compute_s`, which is inside
+`wall_s`; do not add them again to compute/wall. Cold assignment/accumulation
+calls include Numba JIT. No performance or GPU Mini-Batch claim is made. Metadata
+records stopping, sampling, probe indices, counts and point-processing work;
+Mini-Batch steps are not equivalent to full Lloyd iterations.
