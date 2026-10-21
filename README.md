@@ -325,3 +325,41 @@ have separate host timings. They are subsets of `compute_s`, which is inside
 calls include Numba JIT. No performance or GPU Mini-Batch claim is made. Metadata
 records stopping, sampling, probe indices, counts and point-processing work;
 Mini-Batch steps are not equivalent to full Lloyd iterations.
+
+## Pure adaptive batch-size controller
+
+`pcap.adaptive_controller` supplies immutable `BatchPolicy`, `ControllerState`,
+`Checkpoint` and `BatchDecision` records, `initial_state(policy, objective)` and
+pure `transition(policy, state, checkpoint)`. It does not execute K-Means,
+consume random numbers, measure time or decide convergence. Mini-Batch remains
+fixed-size; no integration or performance improvement is claimed.
+
+Use `BatchPolicy.for_run(N, config.batch_size)` to default the minimum to
+`min(initial_batch, 256, N)` and maximum to `max(initial_batch, min(N, 65536))`.
+Explicit bounds must include the initial batch and lie within 1..N. Feed exact
+fixed-probe mean SSE, normalized checkpoint movement and changed-label fraction.
+Future integration will check every `config.probe_interval` updates (default 10),
+normalize movement by the fixed initial probe RMS spread `s` (floored at 1e-12),
+and set `objective_floor=1e-12*s*s`. The standalone floor defaults to 1e-12.
+
+Priority is: probe objective more than 1% above its retained best checkpoint
+increases batch size to at least double or the associated safe batch; otherwise
+three alternating relative objective changes, each strictly greater than 0.001
+in magnitude, double it; otherwise three quiet checkpoints halve it. Quiet means
+normalized movement <=0.001, label-change fraction <=0.005 and absolute relative
+objective change <=0.001. Relative changes divide by the larger of the previous
+objective and the positive objective floor. All thresholds and quiet-streak
+length are configurable experimental choices. Changes clip to bounds; halving
+uses integer floor. Lower probe objectives update the safe objective and the
+batch that produced it. No centroid/statistic rollback is requested.
+
+Actual batch changes reset quiet/oscillation history. Clipped requests are
+logged with `changed=False` and do not trigger these resets, including repeated
+deterioration at maximum batch size. An unquiet checkpoint still clears the
+quiet streak normally. Future callers must distinguish a requested action from
+an actual size change and must not reset stopping counters on clipped no-ops.
+Maximum-batch stopping confirmation will **freeze adaptation** during future
+integration; it must not invoke transitions or change batch size during that
+confirmation phase. Controller decisions are reproducible from policy, initial
+state and checkpoint signals. Probe diagnostics do not guarantee full-data
+convergence or detect every rare cluster; policy tuning requires later validation.
