@@ -178,3 +178,96 @@ An audit of the original raw rows confirms two limit-terminated cases:
 measurements at 30 steps: 20 measured rows total. There is no discrepancy with the
 earlier report of two cases. Historical non-convergence follows the recorded
 termination reason; those original rows did not save final centroid displacement.
+
+
+## Sentinel-2 Level-2A preprocessing
+
+`pcap.preprocessing` prepares raw product DN for B02, B03, B04 and B08 on a
+common 10 m grid. No imagery is bundled or downloaded. Both array and file preprocessing use
+**Rasterio** for authoritative GDAL/PROJ CRS validation. Rasterio is imported
+when preprocessing grids/files are used; existing CPU/CUDA modules remain
+independent. Rasterio 1.5.1 is installed in the project environment with bundled
+GDAL; no system GDAL changes are made by this module.
+
+The observed, tested project `.venv` contains these exact versions:
+
+```text
+rasterio==1.5.1
+affine==3.0.1
+attrs==26.1.0
+certifi==2026.10.19
+click==8.5.0
+pyparsing==3.3.3
+```
+
+Rasterio reports bundled GDAL **3.12.4** in this environment. These versions
+record the validated environment for reproducibility; they are not mandatory
+application version checks or a requirement to install system GDAL 3.12.4.
+Preprocessing requires compatible Rasterio functionality for CRS parsing and
+raster I/O; compatibility with other package versions has not been validated.
+
+```python
+from pcap.preprocessing import load_sentinel2, fit_standardization
+
+# Supply assets from the same original SAFE product/granule, not already scaled
+# or harmonized STAC assets. metadata_path is the product MTD_MSIL2A.xml.
+scene = load_sentinel2(band_paths, scl_path, metadata_path,
+                      window=(0, 0, 1024, 1024), sample_size=None, seed=0)
+# Fit once on TRAINING scenes only; apply the saved statistics to every split.
+stats = fit_standardization([scene.X], training_ids=["training-product-id"],
+                            split="train")
+normalized = scene.standardized(stats)
+X = normalized.X  # finite, contiguous float32 [N, 4]
+# After clustering: normalized.map_labels(result.labels), masked/unsampled=-1.
+# Persist stats.to_json() and normalized.metadata with the dataset artifacts.
+```
+
+Reflectance is `(DN + BOA_ADD_OFFSET[band]) / BOA_QUANTIFICATION_VALUE`, parsed
+from product XML. Processing baseline >=04.00 requires explicit offsets;
+earlier products without offsets use zero. DN=0, metadata special values,
+raster masks, nonfinite values and invalid SCL pixels are excluded before
+feature construction. Valid negative reflectance is retained. Calibration
+metadata and its SHA256 are recorded; no fixed 1/10000 conversion is assumed.
+
+SCL is georeferenced onto the band grid with **nearest-neighbor** resampling.
+The array API `preprocess_arrays` requires explicit north-up same-CRS grids and
+handles crop offsets; it never guesses alignment from array shape. The file reader reads a bounded SCL source window with its masks applied, fills
+invalid categories with no-data, then reprojects with nearest-neighbor resampling.
+This preserves explicit dataset masks even when source no-data is also present.
+It checks common band grids/CRS.
+Default SCL exclusions are 0 (no-data), 1 (defective/saturated), 3 (cloud shadow),
+8/9 (cloud), and 10 (cirrus). Snow/ice (11) is retained unless `exclude_snow=True`;
+dark (2) and unclassified (7) pixels are retained. SCL is a quality mask, not
+verified land-cover labels.
+
+Crop windows are `(row, column, height, width)` and file reads default to at most
+1024*1024 crop pixels. Sampling is seeded, without replacement, after masking;
+it reduces X but does not replace cropping as the raster-memory bound.
+`valid_mask` records all eligible crop pixels, while `pixel_indices` identifies
+selected X rows in flattened crop coordinates. Crop/source transforms and CRS
+support reconstruction; unsampled pixels remain unassigned.
+
+Standardization uses pixel-weighted float64 training means/population variance;
+constant bands use scale 1. Transform never refits statistics. The explicit
+training split and scene IDs help prevent accidental leakage, but callers must
+supply truthful split assignments. Saved statistics include their training IDs.
+
+Run synthetic tests without satellite data:
+
+```bash
+.venv/bin/python -B -m pytest tests/test_preprocessing.py -q -p no:cacheprovider
+```
+
+The synthetic preprocessing suite requires Rasterio for CRS validation, including
+tests that pass NumPy arrays. Real SAFE/XML/JP2 integration remains a separate
+validation step; these tests do not download satellite data.
+
+Masked NumPy band arrays retain their masks, combined with explicit band masks,
+DN/special-value checks and SCL exclusions. Masked SCL cells become no-data
+before nearest-neighbor alignment; masked entries in explicit validity masks
+are also treated as invalid. Input arrays and masks are not modified.
+Both array and file APIs parse CRS definitions through Rasterio and require
+projected coordinates with recognised metre-based horizontal units and unit
+conversion factor 1. Geographic, feet-based and unknown CRS/unit definitions
+are rejected; 10 m affine pixel size is checked separately. Equivalent EPSG/WKT
+definitions are compared by parsed CRS equality, not raw string matching.
