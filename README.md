@@ -331,14 +331,14 @@ Mini-Batch steps are not equivalent to full Lloyd iterations.
 `pcap.adaptive_controller` supplies immutable `BatchPolicy`, `ControllerState`,
 `Checkpoint` and `BatchDecision` records, `initial_state(policy, objective)` and
 pure `transition(policy, state, checkpoint)`. It does not execute K-Means,
-consume random numbers, measure time or decide convergence. Mini-Batch remains
-fixed-size; no integration or performance improvement is claimed.
+consume random numbers, measure time or decide convergence. The separate CPU
+adaptive integration is described below; the fixed baseline remains unchanged.
 
 Use `BatchPolicy.for_run(N, config.batch_size)` to default the minimum to
 `min(initial_batch, 256, N)` and maximum to `max(initial_batch, min(N, 65536))`.
 Explicit bounds must include the initial batch and lie within 1..N. Feed exact
 fixed-probe mean SSE, normalized checkpoint movement and changed-label fraction.
-Future integration will check every `config.probe_interval` updates (default 10),
+The CPU integration checks every `config.probe_interval` updates (default 10),
 normalize movement by the fixed initial probe RMS spread `s` (floored at 1e-12),
 and set `objective_floor=1e-12*s*s`. The standalone floor defaults to 1e-12.
 
@@ -358,8 +358,52 @@ logged with `changed=False` and do not trigger these resets, including repeated
 deterioration at maximum batch size. An unquiet checkpoint still clears the
 quiet streak normally. Future callers must distinguish a requested action from
 an actual size change and must not reset stopping counters on clipped no-ops.
-Maximum-batch stopping confirmation will **freeze adaptation** during future
-integration; it must not invoke transitions or change batch size during that
+Maximum-batch stopping confirmation **freezes adaptation** in the CPU
+integration; it does not invoke transitions or change batch size during that
 confirmation phase. Controller decisions are reproducible from policy, initial
 state and checkpoint signals. Probe diagnostics do not guarantee full-data
 convergence or detect every rare cluster; policy tuning requires later validation.
+
+## CPU adaptive Mini-Batch integration
+
+`pcap.adaptive_minibatch.fit_adaptive_minibatch_cpu(X, C0, config, *, policy=None)`
+returns the existing `RunResult`. It uses exact CPU assignments and the committed
+pure controller; fixed Mini-Batch and the shared contracts are unchanged. Supply
+an optional `BatchPolicy` whose initial size equals `config.batch_size` and whose
+maximum is <=N. With no policy, bounds include the initial size and the objective
+floor is `1e-12*s*s`, using the initial fixed-probe RMS spread `s` (floor 1e-12).
+An explicitly supplied policy retains its configured objective floor.
+
+Float64 sums, int64 counts, float32 centroids and the batch RNG persist through
+size changes. Sampling is uniform without replacement within each update; later
+updates may revisit rows. Full batches use input order. A separate seeded stream
+chooses up to 1024 fixed probe rows. Every `probe_interval` updates, exact probe
+mean squared distance, normalized checkpoint displacement and label-change
+fraction feed the controller. Decisions take effect on the next update, with
+safe-reference and before/after controller state logged for replay. Clipped
+requests are not actual changes. Observation work is the sum of actual batch
+sizes, including confirmation updates, not steps times the initial batch size.
+
+Three successive checkpoints with absolute displacement <=`config.tolerance`,
+unchanged exact probe labels, no deterioration and no real controller size
+change request confirmation. The next update uses the maximum batch size.
+Adaptation is then frozen: the transition function is not called. Three fresh
+qualifying checkpoints at that size are required to stop. Confirmation also
+requires probe objective no more than the policy deterioration allowance above
+its entry value. An unstable/quality-failing checkpoint resets the confirmation
+counter; the run remains frozen at maximum size until it qualifies or reaches
+the cap. Even when already at maximum, fresh confirmation checks are required.
+A third qualifying confirmation exactly at `max_steps` reports `tolerance`;
+otherwise an exhausted cap reports `max_steps`, never unconfirmed convergence.
+
+History separates batch/probe objectives, controller requests, actual size
+changes, confirmation phase/counters and observation work. Final full-data labels
+and `result.sse` always use exact assignment at returned centroids. Host timings
+separate sampling, batch assignment, update, monitoring, controller/confirmation
+bookkeeping and final assignment; all are subsets of compute and wall time.
+Cold timings include JIT. No ANN, GPU Mini-Batch or speedup claim is included.
+The probe overlaps training data; small movement under large cumulative counts
+and missed rare clusters can still cause premature heuristic stopping. Neither
+probe stability nor final exact evaluation proves full-data convergence. Tune
+policies on development data before any held-out evaluation; compare quality,
+processed observations and full runtime rather than equal update counts alone.
