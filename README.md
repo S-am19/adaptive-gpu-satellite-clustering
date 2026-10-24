@@ -407,3 +407,119 @@ and missed rare clusters can still cause premature heuristic stopping. Neither
 probe stability nor final exact evaluation proves full-data convergence. Tune
 policies on development data before any held-out evaluation; compare quality,
 processed observations and full runtime rather than equal update counts alone.
+
+## Reproducible integration workflow (October 2026)
+
+The integrated code is developed on `integration-daksh`. `requirements-lock.txt`
+records the entire tested Python 3.12.3 environment, including NumPy 2.2.6,
+Numba 0.65.1, numba-cuda 0.30.4, HNSW 0.8.0, Rasterio 1.5.1,
+Matplotlib 3.11.2 and pandas 3.1.0. On a **new** environment, after approving
+installation, use `python3.12 -m venv .venv` then
+`.venv/bin/python -m pip install -r requirements-lock.txt` and
+`.venv/bin/python -m pip check`. HNSW may need a C++ compiler and Python 3.12
+headers to build; do not change system packages or an existing validated
+installation automatically. Rasterio wheels bundle GDAL; no system GDAL install
+is required. Use the WSL NVIDIA driver bridge; never install Linux GPU drivers
+inside WSL. The lock records this environment, not universal platform support.
+
+Algorithm execution in the integrated runner is explicit:
+
+| ID | Implementation | Execution |
+|---|---|---|
+| C0 | Full Lloyd reference | Sequential CPU |
+| C1 | Fixed Mini-Batch, exact assignment | Sequential CPU, explicit opt-in |
+| G0 | Custom exact full Lloyd | CUDA GPU |
+| G1 | Fixed Mini-Batch, exact assignment | CUDA GPU |
+| G2 | Fixed Mini-Batch + HNSW | CPU prototype |
+| G3 | Adaptive batch, exact assignment | CPU prototype |
+| G4 | Fixed batch + adaptive HNSW effort | CPU prototype |
+| G5 | Joint adaptive batch/HNSW effort | CPU prototype |
+| G3CUDA | Adaptive batch, exact assignment | CUDA GPU, explicit opt-in |
+
+G3CUDA calls `pcap.adaptive_cuda.fit_adaptive_minibatch_cuda`. It preserves
+GPU-resident cumulative sums/counts, centroids and input points across size
+changes; only sampled indices, monitoring data and final results cross the bus.
+Buffers are sized once for the maximum batch, with active slices. It uses the
+same controller/checkpoint/confirmation rules as the CPU adaptive baseline,
+including three fresh frozen maximum-batch confirmation checks. It rejects CUDA
+simulation/unavailable devices, and requires float64-atomic support. Host timings
+include synchronization and transfers; no isolated per-kernel timing or speedup
+is inferred. G2/G4/G5 have **not** become GPU ANN implementations. A beneficial
+GPU ANN technique at small K remains an unresolved project objective.
+
+### Real imagery: required external input, never synthesized
+
+No genuine Sentinel-2 imagery is bundled, downloaded or validated by these
+commands alone. Fixture JP2 filenames contain synthetic GTiff payloads and must
+never be presented as genuine SAFE evidence. `data/scene_candidates.json` contains
+public-catalogue candidates, not acquired/quality-accepted scenes. Obtain approval
+before large downloads or credentialed service access. Supply original L2A SAFE
+products with product-root XML and matching 10 m B02/B03/B04/B08 and 20 m SCL.
+Select nonoverlapping development/validation/test scenes and inspect cloud masks;
+freeze policy settings before held-out evaluation. See `data/README.md`.
+
+Example after those files exist (replace paths and product directory names):
+
+```bash
+# splits.json maps each input product directory to train/validation/test.
+.venv/bin/python -B scripts/prepare_sentinel2_scenes.py \
+  --raw-dir /path/to/approved/SAFE-products --output-dir outputs/prepared-NEW \
+  --training-scene-id TRAIN_PRODUCT.SAFE --split-manifest /path/to/splits.json \
+  --crop-size 512 --row 2000 --column 2000
+
+MPLCONFIGDIR=/tmp/pcap-mplconfig bash scripts/run_suite_cuda.sh \
+  --scene-dir outputs/prepared-NEW/TRAIN_PRODUCT.SAFE \
+  --methods C0 G0 G1 G2 G3 G4 G5 G3CUDA --k 4 16 --seeds 0 1 2 \
+  --batch-size 256 --max-steps 30 --warmups 2 --repeats 5 \
+  --budget-seconds 120 --save-models --output-dir outputs/real-study-NEW
+
+MPLCONFIGDIR=/tmp/pcap-mplconfig .venv/bin/python -B experiments/plot_results.py \
+  --csv outputs/real-study-NEW/benchmark_results_TIMESTAMP.csv \
+  --output-dir outputs/real-study-NEW/figures
+MPLCONFIGDIR=/tmp/pcap-mplconfig .venv/bin/python -B experiments/summarize_suite.py \
+  --csv outputs/real-study-NEW/benchmark_results_TIMESTAMP.csv \
+  --output-dir outputs/real-study-NEW/scaling
+MPLCONFIGDIR=/tmp/pcap-mplconfig .venv/bin/python -B scripts/render_scene.py \
+  --scene-dir outputs/prepared-NEW/TRAIN_PRODUCT.SAFE \
+  --model-dir outputs/real-study-NEW/models_TIMESTAMP/nN_k4_seed0_G0_rep0 \
+  --output-dir outputs/real-study-NEW/scene-map-NEW
+```
+
+A 120-second budget is checked **between** complete fits and includes runner
+work; use `timeout 150s` for a process limit when appropriate. An outer kill can
+prevent final manifest writing, so the internal limit must be smaller. Failed
+fits/budgets propagate exceptions and save failures/partial measurements; missing
+scenes and hash mismatches fail explicitly. Raw JSONL includes warmups, histories,
+internal timings and hashes; warmups are excluded from measured CSV/statistics.
+The runner rotates method order, retains outliers, and does not establish
+fixed-work equivalence across different algorithms. G0/G1/G3CUDA require actual
+GPU access; no fallback occurs. Output directories must be new for preparation
+and rendering. Timestamped model/results files and SHA256 inventories preserve
+individual runs; no previous experiment directory should be reused for figures.
+
+Models save exact final labels/centroids and JSON histories. Rendering checks
+scene/model hashes and exact assignments, outputs georeferenced `clusters.tif`
+with nodata=-1, and preserves masked/unsampled pixel positions. Display-only
+2–98% stretches produce B04/B03/B02 true-color and B08/B04/B03 false-color PNGs;
+these do not change features. Histories produce adaptive batch/effort plots.
+These are cluster IDs, never independently verified land-cover classes.
+
+The summary utility keeps N/D/K/seed separate and reports median/IQR, individual
+run CSVs, SSE, observations and convergence/cap status. Exact C0/G0 speedups are
+reported only for matching steps/termination and compatible final SSE; they are
+external full-fit ratios. Mini-Batch comparisons require matched quality or
+quality-versus-time curves, not iteration counts. The current runner does not
+implement time-to-target trajectories; its final-quality scatter is not a
+convergence curve. Do not pool capped and converged protocols or claim a CPU
+ANN prototype is a GPU speedup. Large-K ANN feasibility and held-out real-scene
+performance still need measured evidence. OpenMP and instructor approval of the
+Python/CUDA scope remain outstanding.
+
+Final regression commands (CUDA failures are errors, not skips):
+
+```bash
+MPLCONFIGDIR=/tmp/pcap-mplconfig .venv/bin/python -B -m pytest tests -q -p no:cacheprovider \
+  --ignore=tests/test_cuda_kmeans.py --ignore=tests/test_cuda_minibatch.py \
+  --ignore=tests/test_cuda_vector_add.py --ignore=tests/test_cuda_adaptive.py
+MPLCONFIGDIR=/tmp/pcap-mplconfig bash scripts/run_cuda_tests.sh tests -x
+```

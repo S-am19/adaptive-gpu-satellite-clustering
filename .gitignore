@@ -45,3 +45,5 @@ data/processed/*.jp2
 data/processed/*.npy
 outputs/
 /tmp/pcap-benchmarks/
+# Prepared scenes and generated experiment/model artifacts (nested directories)
+data/processed/**

@@ -3,13 +3,11 @@
 import math
 import numpy as np
 import pytest
-try:
-    from numba import cuda
-    from pcap.assignments_exact import assign_exact
-    from pcap.minibatch import fit_minibatch_cpu
-    from pcap.minibatch_cuda import fit_minibatch_cuda
-except ImportError:
-    pytest.skip("numba/CUDA required for CUDA Mini-Batch tests", allow_module_level=True)
+from pcap.contracts import FitConfig
+from numba import cuda
+from pcap.assignments_exact import assign_exact
+from pcap.minibatch import fit_minibatch_cpu
+from pcap.minibatch_cuda import fit_minibatch_cuda
 
 
 @pytest.fixture
@@ -71,6 +69,7 @@ def test_cuda_minibatch_matches_cpu(real_cuda, n, d, k, b):
     assert timings["scalar_transfer_s"] <= timings["compute_s"]
     assert timings["transfer_s"] == pytest.approx(
         timings["upload_s"] + timings["scalar_transfer_s"] + timings["download_s"]
+        + timings["batch_index_transfer_s"] + timings["probe_label_transfer_s"]
     )
 
 
@@ -115,7 +114,7 @@ def test_cuda_minibatch_reproducibility(real_cuda, four_features):
     {"ann_effort": 16},   # must be None for fixed exact
     {"tolerance": -1.0},
 ])
-def test_cuda_minibatch_invalid_config(real_cuda, kwargs):
+def test_cuda_minibatch_invalid_config(kwargs):
     points = np.zeros((20, 2), dtype=np.float32)
     initial = np.zeros((2, 2), dtype=np.float32)
     base = {"k": 2, "seed": 0, "max_steps": 5, "tolerance": 1e-4, "batch_size": 10}

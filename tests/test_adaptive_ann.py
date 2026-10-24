@@ -13,12 +13,8 @@ from pcap.adaptive_ann_controller import (
     initial_ann_state,
     transition_ann,
 )
-try:
-    from pcap.adaptive_combined import fit_adaptive_minibatch
-    from pcap.assignments_exact import assign_exact
-except ImportError:
-    fit_adaptive_minibatch = None
-    assign_exact = None
+from pcap.adaptive_combined import fit_adaptive_minibatch
+from pcap.assignments_exact import assign_exact
 from pcap.adaptive_controller import Checkpoint
 from pcap.contracts import FitConfig
 
@@ -101,7 +97,6 @@ def test_ann_transition_rollback_on_deterioration():
     assert state.effort == 64  # restored safe effort
 
 
-@pytest.mark.skipif(fit_adaptive_minibatch is None, reason="numba required for integration fit")
 def test_combined_adaptive_modes(fake_hnsw):
     rng = np.random.default_rng(77)
     points = rng.normal(size=(60, 4)).astype(np.float32)

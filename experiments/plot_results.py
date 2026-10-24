@@ -108,9 +108,21 @@ def render_cluster_map(
     valid_mask: np.ndarray,
     pixel_indices: np.ndarray | None,
     output_path: Path,
-    title: str = "Clustered Land-Cover Segmentation",
+    title: str = "Satellite pixel cluster IDs",
 ):
     """Reconstruct 2D spatial cluster image from 1D labels and valid mask."""
+    if valid_mask.dtype != np.bool_ or valid_mask.ndim != 2:
+        raise ValueError("valid_mask must be a 2D boolean array")
+    if labels.ndim != 1 or not np.issubdtype(labels.dtype, np.integer) or not len(labels) or np.any(labels < 0):
+        raise ValueError("labels must be a nonempty nonnegative integer vector")
+    if pixel_indices is not None:
+        if (pixel_indices.shape != labels.shape or not np.issubdtype(pixel_indices.dtype, np.integer)
+                or np.any(pixel_indices < 0) or np.any(pixel_indices >= valid_mask.size)
+                or len(np.unique(pixel_indices)) != len(pixel_indices)
+                or not np.all(valid_mask.ravel()[pixel_indices])):
+            raise ValueError("pixel_indices must be distinct valid pixel positions matching labels")
+    elif len(labels) != valid_mask.sum():
+        raise ValueError("labels must match valid pixels")
     h, w = valid_mask.shape
     image_grid = np.full((h, w), -1, dtype=np.int32)
 
@@ -122,10 +134,10 @@ def render_cluster_map(
 
     plt.figure(figsize=(8, 8), dpi=200)
     # Masked pixels (-1) displayed in dark gray
-    cmap = plt.cm.get_cmap("tab20", int(labels.max() + 1))
-    cmap.set_under("black")
+    cmap = matplotlib.colormaps["tab20"].resampled(int(labels.max() + 1))
+    cmap.set_bad("black")
 
-    im = plt.imshow(image_grid, cmap=cmap, vmin=0, vmax=int(labels.max()))
+    im = plt.imshow(np.ma.masked_less(image_grid, 0), cmap=cmap, vmin=-0.5, vmax=int(labels.max()) + 0.5)
     plt.title(title, fontsize=12, fontweight="bold")
     plt.axis("off")
     cbar = plt.colorbar(im, fraction=0.046, pad=0.04)
@@ -136,8 +148,30 @@ def render_cluster_map(
     print(f"Saved spatial cluster map: {output_path}")
 
 
+def plot_histories(raw_path, output_dir):
+    """Plot measured repeat zero for each adaptive case; never average histories."""
+    import json
+    for line in Path(raw_path).read_text().splitlines():
+        row = json.loads(line)
+        if row["phase"] != "measured" or row["repeat"] != 0 or row["method"] not in ("G3", "G4", "G5", "G3CUDA"):
+            continue
+        h = row["history"]
+        fig, axes = plt.subplots(2, 1, sharex=True)
+        steps = [v["step"] for v in h]
+        axes[0].step(steps, [v["batch_size"] for v in h], where="post")
+        axes[0].set_ylabel("Batch observations")
+        axes[1].step(steps, [v.get("ann_effort") or 0 for v in h], where="post")
+        axes[1].set_ylabel("ANN effort (0=none)")
+        axes[1].set_xlabel("Update step")
+        fig.suptitle(f'{row["method"]}: {row["implementation"]}, N={row["n"]}, K={row["k"]}, seed={row["seed"]}, repeat=0')
+        fig.tight_layout()
+        fig.savefig(Path(output_dir) / f'history_n{row["n"]}_d{row["d"]}_k{row["k"]}_seed{row["seed"]}_{row["method"]}.png')
+        plt.close(fig)
+
+
 def main():
     parser = argparse.ArgumentParser(description="PCAP Results Plotter")
+    parser.add_argument("--raw-jsonl", type=Path, help="Optional raw log for per-case adaptation histories")
     parser.add_argument("--csv", type=str, required=True, help="Path to benchmark CSV results file")
     parser.add_argument(
         "--output-dir",
@@ -153,14 +187,27 @@ def main():
         sys.exit(1)
 
     out_dir = Path(args.output_dir)
+    if out_dir.exists() and any(out_dir.iterdir()):
+        raise FileExistsError("Choose a new empty figure directory; outputs are never overwritten")
     out_dir.mkdir(parents=True, exist_ok=True)
 
     df = pd.read_csv(csv_path)
     print(f"Loaded {len(df)} experiment rows from {csv_path}")
 
-    plot_quality_vs_time(df, out_dir / "quality_vs_time.png")
-    plot_throughput_bars(df, out_dir / "throughput_comparison.png")
-    plot_ablation_comparison(df, out_dir / "ablation_comparison.png")
+    # Never pool sizes, dimensions, K or seeds into one misleading comparison.
+    group_columns = [c for c in ("n", "d", "k", "seed") if c in df]
+    if "implementation" in df:
+        df = df.copy()
+        df["method"] = df["method"] + " (" + df["implementation"] + ")"
+    groups = df.groupby(group_columns) if group_columns else [((), df)]
+    for key, group in groups:
+        key = key if isinstance(key, tuple) else (key,)
+        suffix = "_".join(f"{c}{v}" for c, v in zip(group_columns, key)) or "results"
+        plot_quality_vs_time(group, out_dir / f"quality_vs_time_{suffix}.png")
+        plot_throughput_bars(group, out_dir / f"throughput_comparison_{suffix}.png")
+        plot_ablation_comparison(group, out_dir / f"ablation_comparison_{suffix}.png")
+    if args.raw_jsonl:
+        plot_histories(args.raw_jsonl, out_dir)
     print(f"All benchmark figures generated in {out_dir}")
 
 

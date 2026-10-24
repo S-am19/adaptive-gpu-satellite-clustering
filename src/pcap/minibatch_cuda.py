@@ -208,6 +208,8 @@ def fit_minibatch_cuda(X, C0, config) -> RunResult:
     if device.compute_capability < (6, 0):
         raise RuntimeError("float64 atomic accumulation requires compute capability >= 6.0")
 
+    if n > np.iinfo(np.int32).max:
+        raise ValueError("Indexed CUDA Mini-Batch requires N within int32 capacity")
     batch_size = int(config.batch_size)
     probe_size = min(n, _PROBE_SIZE)
     estimated_bytes = _required_device_bytes(n, d, k, batch_size, probe_size)
@@ -227,8 +229,11 @@ def fit_minibatch_cuda(X, C0, config) -> RunResult:
     upload_time = perf_counter() - upload_start
 
     # Persistent statistics on device
+    upload_start = perf_counter()
     d_sums = cuda.to_device(np.zeros((k, d), dtype=np.float64))
     d_counts = cuda.to_device(np.zeros(k, dtype=np.int64))
+    cuda.synchronize()
+    upload_time += perf_counter() - upload_start
     d_shifts = cuda.device_array(k, dtype=np.float64)
 
     # Batch buffers
@@ -257,13 +262,17 @@ def fit_minibatch_cuda(X, C0, config) -> RunResult:
     rng = np.random.default_rng(config.seed)
     probe_rng = np.random.default_rng(np.random.SeedSequence([config.seed, 1]))
     probe_indices = np.sort(probe_rng.choice(n, size=probe_size, replace=False)).astype(np.int32)
+    upload_start = perf_counter()
     cuda.to_device(probe_indices, to=d_probe_indices)
     cuda.synchronize()
+    upload_time += perf_counter() - upload_start
     setup_time = perf_counter() - setup_start
 
     kernel_time = 0.0
     scalar_transfer_time = 0.0
     sampling_time = 0.0
+    batch_upload_time = 0.0
+    probe_download_time = 0.0
     assignment_time = 0.0
     update_time = 0.0
     monitoring_time = 0.0
@@ -276,6 +285,7 @@ def fit_minibatch_cuda(X, C0, config) -> RunResult:
         scalar_transfer_time += perf_counter() - start
         return val
 
+    compute_start = perf_counter()
     # Initial probe evaluation
     m_start = perf_counter()
     def eval_initial_probe():
@@ -283,22 +293,25 @@ def fit_minibatch_cuda(X, C0, config) -> RunResult:
             d_points, d_probe_indices, d_centroids, d_probe_labels, d_probe_distances)
     _, el = _timed_kernels(eval_initial_probe)
     kernel_time += el
+    transfer_start = perf_counter()
     previous_probe_labels = d_probe_labels.copy_to_host()
     cuda.synchronize()
+    probe_download_time += perf_counter() - transfer_start
     monitoring_time += perf_counter() - m_start
 
     history = []
     stable_checks = probe_checks = 0
     converged = False
-    compute_start = perf_counter()
 
     for step in range(1, int(config.max_steps) + 1):
         # 1. Sample batch indices
         s_start = perf_counter()
         raw_indices = _sample_batch_indices(rng, n, batch_size)
         batch_indices = np.ascontiguousarray(raw_indices, dtype=np.int32)
+        transfer_start = perf_counter()
         cuda.to_device(batch_indices, to=d_batch_indices)
         cuda.synchronize()
+        batch_upload_time += perf_counter() - transfer_start
         sampling_time += perf_counter() - s_start
 
         # 2. Batch assignment (against pre-update centroids)
@@ -350,8 +363,10 @@ def fit_minibatch_cuda(X, C0, config) -> RunResult:
             probe_sse = read_scalar(d_sse_scalar)
             checkpoint_movement = math.sqrt(read_scalar(d_shift_scalar))
 
+            transfer_start = perf_counter()
             current_probe_labels = d_probe_labels.copy_to_host()
             cuda.synchronize()
+            probe_download_time += perf_counter() - transfer_start
             changes = float(np.mean(current_probe_labels != previous_probe_labels))
             stable = checkpoint_movement <= config.tolerance and changes == 0.0
             stable_checks = stable_checks + 1 if stable else 0
@@ -449,7 +464,7 @@ def fit_minibatch_cuda(X, C0, config) -> RunResult:
             "wall includes validation, context setup, allocations, transfers, compute and metadata; "
             "compute includes sampling, batch assignments, accumulation/updates, monitoring and final assignment; "
             "kernel_s and final_assignment_s overlap compute_s; "
-            "upload_s is within setup_s; transfer_s includes upload, scalar downloads and result downloads"
+            "upload_s is within setup_s; transfer_s includes setup uploads, batch-index uploads, probe-label downloads, scalar and result downloads"
         ),
     }
 
@@ -464,8 +479,10 @@ def fit_minibatch_cuda(X, C0, config) -> RunResult:
         setup_s=setup_time,
         upload_s=upload_time,
         scalar_transfer_s=scalar_transfer_time,
+        batch_index_transfer_s=batch_upload_time,
+        probe_label_transfer_s=probe_download_time,
         download_s=download_time,
-        transfer_s=upload_time + scalar_transfer_time + download_time,
+        transfer_s=upload_time + scalar_transfer_time + download_time + batch_upload_time + probe_download_time,
         wall_s=perf_counter() - wall_start,
     )
 

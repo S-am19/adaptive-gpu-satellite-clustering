@@ -45,6 +45,8 @@ class ANNEffortPolicy:
     def __post_init__(self):
         if not isinstance(self.levels, (tuple, list)) or len(self.levels) == 0:
             raise ValueError("levels must be a non-empty sequence of effort values")
+        for val in self.levels:
+            _integer("effort level", val, minimum=1)
         levels_tuple = tuple(int(v) for v in self.levels)
         for val in levels_tuple:
             _integer("effort level", val, minimum=1)

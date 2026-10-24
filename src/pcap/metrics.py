@@ -15,6 +15,15 @@ import numpy as np
 from .contracts import RunResult, validate_features, validate_integer
 
 
+def _validate_labels(points, labels, k=None):
+    if not isinstance(labels, np.ndarray) or not np.issubdtype(labels.dtype, np.integer):
+        raise TypeError("labels must be an integer NumPy array")
+    if labels.shape != (len(points),) or np.any(labels < 0):
+        raise ValueError("labels must have shape [N] with nonnegative IDs")
+    if k is not None and np.any(labels >= k):
+        raise ValueError("labels must be in 0..K-1")
+
+
 def compute_sse(points: np.ndarray, centroids: np.ndarray, labels: np.ndarray) -> float:
     """Compute exact full-data SSE with float64 accumulation."""
     validate_features("points", points)
@@ -24,8 +33,15 @@ def compute_sse(points: np.ndarray, centroids: np.ndarray, labels: np.ndarray) -
     if labels.shape != (points.shape[0],):
         raise ValueError("labels must have shape [N]")
 
-    delta = points.astype(np.float64) - centroids[labels].astype(np.float64)
-    return float(np.sum(delta * delta, dtype=np.float64))
+    _validate_labels(points, labels, len(centroids))
+    if points.shape[1] != centroids.shape[1]:
+        raise ValueError("Feature dimensions must agree")
+    total = 0.0
+    for start in range(0, len(points), 4096):
+        stop = start + 4096
+        delta = points[start:stop].astype(np.float64) - centroids[labels[start:stop]].astype(np.float64)
+        total += float(np.sum(delta * delta, dtype=np.float64))
+    return total
 
 
 def compute_rmse(sse: float, n: int, d: int) -> float:
@@ -49,6 +65,8 @@ def compute_ann_recall(ann_labels: np.ndarray, exact_labels: np.ndarray) -> floa
     """Compute fraction of exact nearest-centroid label matches (ANN recall)."""
     if not isinstance(ann_labels, np.ndarray) or not isinstance(exact_labels, np.ndarray):
         raise TypeError("Labels must be NumPy arrays")
+    if ann_labels.ndim != 1 or exact_labels.ndim != 1 or not np.issubdtype(ann_labels.dtype, np.integer) or not np.issubdtype(exact_labels.dtype, np.integer):
+        raise ValueError("Labels must be one-dimensional integer arrays")
     if ann_labels.shape != exact_labels.shape:
         raise ValueError("ann_labels and exact_labels must have the same shape")
     if len(ann_labels) == 0:
@@ -57,6 +75,8 @@ def compute_ann_recall(ann_labels: np.ndarray, exact_labels: np.ndarray) -> floa
 
 
 def _sample_for_metrics(points: np.ndarray, labels: np.ndarray, max_points: int, seed: int):
+    _validate_labels(points, labels)
+    validate_integer("seed", seed, 0)
     n = points.shape[0]
     if n <= max_points:
         return points, labels
@@ -107,7 +127,7 @@ def compute_davies_bouldin(
         for j in range(k):
             if i != j:
                 dist = centroid_dists[i, j]
-                ratio = (dispersions[i] + dispersions[j]) / dist if dist > 1e-12 else 0.0
+                ratio = (dispersions[i] + dispersions[j]) / dist if dist > 0 else (float("inf") if dispersions[i] + dispersions[j] > 0 else 0.0)
                 r_i.append(ratio)
         d_vals.append(max(r_i) if r_i else 0.0)
 
@@ -134,38 +154,23 @@ def compute_silhouette_score(
     if k <= 1 or len(sub_points) <= k:
         return 0.0
 
-    # Pairwise Euclidean distances
-    diff = sub_points[:, None, :].astype(np.float64) - sub_points[None, :, :].astype(np.float64)
-    dist_matrix = np.sqrt(np.sum(diff * diff, axis=2))
-
-    silhouettes = np.empty(len(sub_points), dtype=np.float64)
-
-    for i in range(len(sub_points)):
+    # Stream pairwise distances by point: O(sample_size * D) scratch, not
+    # O(sample_size**2 * D). Float64 subtraction avoids float32 overflow.
+    values = sub_points.astype(np.float64)
+    masks = {label: sub_labels == label for label in unique_labels}
+    silhouettes = np.zeros(len(values), dtype=np.float64)
+    for i, point in enumerate(values):
         own_label = sub_labels[i]
-        own_mask = (sub_labels == own_label)
-
-        # Intra-cluster mean distance a(i)
-        own_count = np.sum(own_mask)
-        if own_count > 1:
-            a_i = np.sum(dist_matrix[i, own_mask]) / (own_count - 1)
-        else:
-            a_i = 0.0
-
-        # Nearest cluster mean distance b(i)
-        b_candidates = []
-        for other_label in unique_labels:
-            if other_label != own_label:
-                other_mask = (sub_labels == other_label)
-                if np.any(other_mask):
-                    b_candidates.append(np.mean(dist_matrix[i, other_mask]))
-
-        b_i = min(b_candidates) if b_candidates else 0.0
-
-        max_ab = max(a_i, b_i)
-        if max_ab > 1e-12 and own_count > 1:
-            silhouettes[i] = (b_i - a_i) / max_ab
-        else:
-            silhouettes[i] = 0.0
+        own_count = int(np.sum(masks[own_label]))
+        if own_count <= 1:
+            continue
+        delta = values - point
+        distances = np.sqrt(np.sum(delta * delta, axis=1))
+        a_i = float(np.sum(distances[masks[own_label]]) / (own_count - 1))
+        b_i = min(float(np.mean(distances[mask])) for label, mask in masks.items() if label != own_label)
+        denom = max(a_i, b_i)
+        if denom > 0:
+            silhouettes[i] = (b_i - a_i) / denom
 
     return float(np.mean(silhouettes))
 

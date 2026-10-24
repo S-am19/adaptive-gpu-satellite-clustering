@@ -52,7 +52,7 @@ def fit_minibatch_ann_cpu(X, C0, config, *, backend=None) -> RunResult:
 
     if backend is None:
         backend = HNSWCPUBackend(seed=config.seed, ann_effort=config.ann_effort)
-    elif not isinstance(backend, AssignmentBackend) and not hasattr(backend, "assign"):
+    elif not all(callable(getattr(backend, name, None)) for name in ("prepare", "assign", "refresh")):
         raise TypeError("backend must implement the AssignmentBackend protocol")
 
     compute_start = perf_counter()
@@ -194,7 +194,7 @@ def fit_minibatch_ann_cpu(X, C0, config, *, backend=None) -> RunResult:
         "cluster_observation_counts": counts.tolist(),
         "observation_counts_include_C0": False,
         "points_processed": step * int(config.batch_size),
-        "assignment_points_processed": step * int(config.batch_size) + (probe_checks + 1) * len(probe) + n,
+        "assignment_points_processed": step * int(config.batch_size) + (2 * probe_checks + 3) * len(probe) + n,
         "ann_backend": backend.__class__.__name__,
         "ann_effort": int(config.ann_effort),
         "ann_timings": dict(ann_timings),
@@ -204,7 +204,7 @@ def fit_minibatch_ann_cpu(X, C0, config, *, backend=None) -> RunResult:
         "centroid_dtype": "float32",
         "accumulation_dtype": "float64",
         "empty_cluster_policy": "retain",
-        "tie_policy": "lowest_index",
+        "tie_policy": "lowest_index for final exact evaluation; backend-specific during training",
         "initialization": "provided_C0",
         "history_objective_policy": "batch/probe objectives only; final full SSE exclusively in final_exact_sse",
         "timing_scope": (

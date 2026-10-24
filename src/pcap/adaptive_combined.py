@@ -5,8 +5,8 @@ Supports three distinct ablation modes:
 - 'ann_only' (G4): Adapts ANN search effort (efSearch) with a fixed batch size.
 - 'combined' (G5): Jointly adapts both batch size and ANN effort simultaneously.
 
-A frozen confirmation phase at maximum batch size / high search effort guarantees
-that heuristic probe stability is robust before stopping. Final clustering
+A frozen confirmation phase checks stability at maximum batch size / high effort.
+This remains an overlapping-probe heuristic, not proof of full-data convergence. Final clustering
 labels and SSE are strictly computed via a 100% exact full-data pass.
 """
 
@@ -72,6 +72,8 @@ def fit_adaptive_minibatch(
     if mode not in ("batch_only", "ann_only", "combined"):
         raise ValueError("mode must be 'batch_only', 'ann_only', or 'combined'")
 
+    supplied_batch_policy = batch_policy is not None
+    supplied_ann_policy = ann_policy is not None
     # Configure policies
     use_adaptive_batch = mode in ("batch_only", "combined")
     use_adaptive_ann = mode in ("ann_only", "combined")
@@ -91,12 +93,18 @@ def fit_adaptive_minibatch(
         if ann_policy is None:
             ann_policy = ANNEffortPolicy(
                 levels=(64, 32, 16, 8),
-                initial_effort=initial_effort if initial_effort in (64, 32, 16, 8) else 64,
+                initial_effort=initial_effort,
             )
         elif not isinstance(ann_policy, ANNEffortPolicy):
             raise TypeError("ann_policy must be ANNEffortPolicy or None")
     else:
         ann_policy = None
+
+    max_batch = batch_policy.maximum if batch_policy else config.batch_size
+    if int(config.max_steps) * int(max_batch) > np.iinfo(np.int64).max:
+        raise ValueError("Cumulative observation count exceeds int64 capacity")
+    if ann_policy and config.ann_effort is not None and ann_policy.initial_effort != config.ann_effort:
+        raise ValueError("ann_policy must match config.ann_effort")
 
     # Resolve backend
     if backend is None:
@@ -105,7 +113,7 @@ def fit_adaptive_minibatch(
         else:
             effort = ann_policy.initial_effort if ann_policy else (config.ann_effort or 16)
             backend = HNSWCPUBackend(seed=config.seed, ann_effort=effort)
-    elif not hasattr(backend, "assign"):
+    elif not all(callable(getattr(backend, name, None)) for name in ("prepare", "assign", "refresh")):
         raise TypeError("backend must implement the AssignmentBackend protocol")
 
     compute_start = perf_counter()
@@ -138,13 +146,15 @@ def fit_adaptive_minibatch(
     floor = 1e-12 * scale * scale
 
     if use_adaptive_batch:
-        batch_policy = replace(batch_policy, objective_floor=floor)
+        if not supplied_batch_policy:
+            batch_policy = replace(batch_policy, objective_floor=floor)
         b_state = initial_state(batch_policy, initial_objective)
     else:
         b_state = None
 
     if use_adaptive_ann:
-        ann_policy = replace(ann_policy, objective_floor=floor)
+        if not supplied_ann_policy:
+            ann_policy = replace(ann_policy, objective_floor=floor)
         a_state = initial_ann_state(ann_policy, initial_objective)
     else:
         a_state = None
@@ -221,6 +231,7 @@ def fit_adaptive_minibatch(
             label_changes = float(np.mean(current_probe.labels != previous_probe.labels))
             monitoring_time += perf_counter() - start
 
+            start = perf_counter()
             # Evaluate ANN on probe to track empirical recall
             if hasattr(backend, "assign") and not isinstance(backend, ExactCPUBackend):
                 ann_probe = backend.assign(probe, centroids, effort=effort)
@@ -228,12 +239,15 @@ def fit_adaptive_minibatch(
             else:
                 probe_recall = 1.0
 
+            monitoring_time += perf_counter() - start
             probe_checks += 1
             checkpoint = Checkpoint(probe_mean_sse, norm_movement, label_changes)
 
             if confirming:
                 # In confirmation phase: adaptation is frozen at maximum configuration
-                max_allowed = confirmation_objective * (1.0 + (batch_policy.deterioration if batch_policy else 0.01))
+                quality_policies = [p for p in (batch_policy, ann_policy) if p is not None]
+                max_allowed = min(confirmation_objective + p.deterioration * max(
+                    confirmation_objective, p.objective_floor) for p in quality_policies)
                 qualifies = (
                     checkpoint_movement <= config.tolerance
                     and label_changes == 0.0
@@ -254,6 +268,8 @@ def fit_adaptive_minibatch(
                 # In adapting phase: transition state machines
                 start = perf_counter()
                 b_decision = a_decision = None
+                before_batch_state = asdict(b_state) if b_state else None
+                before_ann_state = asdict(a_state) if a_state else None
 
                 if use_adaptive_batch:
                     b_state, b_decision = transition(batch_policy, b_state, checkpoint)
@@ -264,10 +280,13 @@ def fit_adaptive_minibatch(
 
                 # Check if stability qualifies for confirmation phase
                 stable = checkpoint_movement <= config.tolerance and label_changes == 0.0
-                stable_checks = stable_checks + 1 if stable else 0
+                decisions = [d for d in (b_decision, a_decision) if d is not None]
+                safe = all(not d.changed and not d.deteriorated for d in decisions)
+                stable_checks = stable_checks + 1 if stable and safe else 0
 
                 # If 3 stable adapting checkpoints achieved: enter confirmation phase
                 if stable_checks >= _STABLE_CHECKS:
+                    entry["confirmation_entered"] = True
                     confirming = True
                     confirmation_objective = probe_mean_sse
                     confirmation_checks = 0
@@ -284,6 +303,10 @@ def fit_adaptive_minibatch(
                     probe_label_change_fraction=label_changes,
                     stable_checks=stable_checks,
                     convergence_satisfied=False,
+                    batch_state_before=before_batch_state,
+                    ann_state_before=before_ann_state,
+                    batch_state=asdict(b_state) if b_state else None,
+                    ann_state=asdict(a_state) if a_state else None,
                     batch_decision=asdict(b_decision) if b_decision else None,
                     ann_decision=asdict(a_decision) if a_decision else None,
                 )
@@ -307,6 +330,12 @@ def fit_adaptive_minibatch(
         "algorithm": f"adaptive_minibatch_{mode}",
         "mode": mode,
         "config": asdict(config),
+        "execution_device": "cpu",
+        "ann_effort": int(a_state.effort) if a_state else config.ann_effort,
+        "controller_final_batch_state": asdict(b_state) if b_state else None,
+        "controller_final_ann_state": asdict(a_state) if a_state else None,
+        "batch_policy": asdict(batch_policy) if batch_policy else None,
+        "ann_policy": asdict(ann_policy) if ann_policy else None,
         "final_exact_sse": final_sse,
         "steps": step,
         "termination_reason": "tolerance" if converged else "max_steps",
@@ -314,10 +343,15 @@ def fit_adaptive_minibatch(
         "confirming_phase_entered": confirming,
         "confirmation_checks": confirmation_checks,
         "stable_checks": stable_checks,
+        "initial_probe_objective": initial_objective,
+        "probe_scale": scale,
+        "probe_role": "overlapping training-population heuristic, not held-out validation",
         "probe_size": len(probe),
         "probe_checks": probe_checks,
         "probe_indices": probe_indices.tolist(),
         "points_processed": observations,
+        "assignment_points_processed": observations + n + (probe_checks + 1) * len(probe)
+            + (probe_checks * len(probe) if not isinstance(backend, ExactCPUBackend) else 0),
         "cumulative_observations": int(counts.sum()),
         "cluster_observation_counts": counts.tolist(),
         "ann_backend": backend.__class__.__name__,
@@ -328,7 +362,7 @@ def fit_adaptive_minibatch(
         "centroid_dtype": "float32",
         "accumulation_dtype": "float64",
         "empty_cluster_policy": "retain",
-        "tie_policy": "lowest_index",
+        "tie_policy": "lowest_index for final exact evaluation; backend-specific during training",
         "initialization": "provided_C0",
         "history_objective_policy": "batch/probe objectives only; final full SSE exclusively in final_exact_sse",
         "timing_scope": (

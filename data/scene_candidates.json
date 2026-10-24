@@ -1,0 +1,36 @@
+{
+  "@odata.context": "$metadata#Products(Id,Name,ContentLength,ContentDate)",
+  "value": [
+    {
+      "@odata.mediaContentType": "application/octet-stream",
+      "Id": "22e60cb0-0c42-401f-b740-926d85e8cc50",
+      "Name": "S2A_MSIL2A_20240605T104031_N0510_R008_T31UFS_20240605T182755.SAFE",
+      "ContentLength": 1092617206,
+      "ContentDate": {
+        "Start": "2024-06-05T10:40:31.024000Z",
+        "End": "2024-06-05T10:40:31.024000Z"
+      }
+    },
+    {
+      "@odata.mediaContentType": "application/octet-stream",
+      "Id": "8a10623d-2ef0-46e7-8c10-ce4e57049914",
+      "Name": "S2A_MSIL2A_20240618T105031_N0510_R051_T31UFS_20240618T142800.SAFE",
+      "ContentLength": 705622973,
+      "ContentDate": {
+        "Start": "2024-06-18T10:50:31.024000Z",
+        "End": "2024-06-18T10:50:31.024000Z"
+      }
+    },
+    {
+      "@odata.mediaContentType": "application/octet-stream",
+      "Id": "3e6cd20b-afb3-49ca-b464-e97eabee21f1",
+      "Name": "S2A_MSIL2A_20240628T105031_N0510_R051_T31UFS_20240628T165157.SAFE",
+      "ContentLength": 1213348329,
+      "ContentDate": {
+        "Start": "2024-06-28T10:50:31.024000Z",
+        "End": "2024-06-28T10:50:31.024000Z"
+      }
+    }
+  ],
+  "@odata.nextLink": "https://catalogue.dataspace.copernicus.eu/odata/v1/Products?%24filter=Collection%2FName+eq+%27SENTINEL-2%27+and+contains%28Name%2C%27MSIL2A%27%29+and+contains%28Name%2C%27T31UFS%27%29+and+ContentDate%2FStart+gt+2024-06-01T00%3A00%3A00.000Z+and+ContentDate%2FStart+lt+2024-07-01T00%3A00%3A00.000Z&%24top=3&%24select=Id%2CName%2CContentLength%2CContentDate&%24skip=3"
+}

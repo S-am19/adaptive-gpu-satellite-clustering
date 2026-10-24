@@ -9,12 +9,9 @@ import pytest
 from pcap.assignments_ann import HNSWCPUBackend
 from pcap.contracts import FitConfig
 
-try:
-    from pcap.assignments_exact import assign_exact
-    from pcap.minibatch import fit_minibatch_cpu
-    from pcap.minibatch_ann import fit_minibatch_ann_cpu
-except ImportError:
-    pytest.skip("numba is required for Mini-Batch tests", allow_module_level=True)
+from pcap.assignments_exact import assign_exact
+from pcap.minibatch import fit_minibatch_cpu
+from pcap.minibatch_ann import fit_minibatch_ann_cpu
 
 
 @pytest.fixture

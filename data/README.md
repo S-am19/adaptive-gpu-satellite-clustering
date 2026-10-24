@@ -34,10 +34,17 @@ Once granules are downloaded into `data/raw/`, run:
 python scripts/prepare_sentinel2_scenes.py \
     --raw-dir data/raw \
     --output-dir data/processed \
-    --crop-sizes 512 1024 2048
+    --crop-size 512 \
+    --training-scene-id YOUR_TRAIN_SCENE \
+    --split-manifest scene_splits.json
 ```
 
 This ensures:
 1. Standardization statistics ($\mu, \sigma^2$) are fitted **strictly on the development (training) scene** and applied unchanged to validation and test scenes to prevent data leakage.
 2. Only valid, cloud-free pixels are included in the 2D feature matrix `X` ($[N, 4]$ float32).
 3. Coordinate reference system (CRS), affine transforms, and `pixel_indices` are preserved to reconstruct 2D spatial cluster maps.
+
+`scene_splits.json` must map every input directory name to `train`, `validation`,
+or `test`. Exactly one training scene is supported. Asset discovery rejects
+multiple granules, duplicate assets, mismatched acquisition prefixes and tile
+metadata substituted for product calibration. No real scene execution is claimed.
