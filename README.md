@@ -259,8 +259,9 @@ Run synthetic tests without satellite data:
 ```
 
 The synthetic preprocessing suite requires Rasterio for CRS validation, including
-tests that pass NumPy arrays. Real SAFE/XML/JP2 integration remains a separate
-validation step; these tests do not download satellite data.
+tests that pass NumPy arrays. The tests do not download satellite data. A genuine
+baseline-05.10 SAFE/JP2 product was separately validated; see
+`docs/REAL_SCENE_RESULTS.md`.
 
 Masked NumPy band arrays retain their masks, combined with explicit band masks,
 DN/special-value checks and SCL exclusions. Masked SCL cells become no-data
@@ -523,3 +524,11 @@ MPLCONFIGDIR=/tmp/pcap-mplconfig .venv/bin/python -B -m pytest tests -q -p no:ca
   --ignore=tests/test_cuda_vector_add.py --ignore=tests/test_cuda_adaptive.py
 MPLCONFIGDIR=/tmp/pcap-mplconfig bash scripts/run_cuda_tests.sh tests -x
 ```
+
+## Genuine satellite validation
+
+The original Sentinel-2A L2A product from 25 June 2024, tile 31UFS, has now
+been processed from genuine SAFE/XML/JP2 files. Exact CPU/CUDA and fixed/ANN/
+adaptive variants completed the real crop workflow and generated georeferenced
+cluster maps. See [real-scene details, artifacts and reproduction](docs/REAL_SCENE_RESULTS.md).
+This is one product; independent held-out scenes and GPU ANN remain unresolved.
