@@ -1,4 +1,11 @@
-# Genuine Sentinel-2 workflow — 24 October 2026
+# Genuine Sentinel-2 workflow and results — updated 26 October 2026
+
+> This document is chronological. The initial report and its acceptance notes
+> describe the state on 24 October 2026; later dated continuation sections
+> supersede earlier implementation/status statements where explicitly stated.
+> The latest completed real-image quality matrix and decayed-count diagnostic
+> are recorded near the end. See [`IMPLEMENTATION_PLAN_STATUS.md`](IMPLEMENTATION_PLAN_STATUS.md)
+> for the concise current acceptance audit.
 
 This report supersedes the pre-acquisition limitations in `RESULTS_STATUS.md`
 **for one genuine SAFE product**. It does not establish cross-scene generalization
@@ -196,9 +203,12 @@ sha256sum -c outputs/20261024-real-evaluation/checksums-all-real.sha256
 ```
 
 View `outputs/20261024-real-evaluation/real-scene-comparison.png` for the real
-true-color/NIR/cluster comparison. The working branch remains integration-daksh;
-the validated implementation is local commit a48eab8; this report records the
-subsequent real-data evidence. No push or merge was performed.
+true-color/NIR/cluster comparison. **At the time of this 24 October report,**
+the working branch was integration-daksh and the validated implementation was
+local commit a48eab8; this report recorded subsequent real-data evidence. That
+branch/commit note is historical; see the dated Git snapshot in
+`docs/IMPLEMENTATION_PLAN_STATUS.md` for the later audited state. No push or
+merge was performed for that earlier report.
 
 ## Acceptance against the unchanged original plan
 

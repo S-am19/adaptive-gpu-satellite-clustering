@@ -1,6 +1,12 @@
 # adaptive-gpu-satellite-clustering
 GPU-accelerated adaptive Mini-Batch K-Means for satellite image clustering using Python and CUDA
 
+The original [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md) is retained as
+the proposal and acceptance baseline; its pre-implementation status wording is
+historical. Current gates and evidence are summarized in
+[`docs/IMPLEMENTATION_PLAN_STATUS.md`](docs/IMPLEMENTATION_PLAN_STATUS.md), with
+chronological real-scene results in [`docs/REAL_SCENE_RESULTS.md`](docs/REAL_SCENE_RESULTS.md).
+
 ## CUDA smoke test (M0)
 
 With the project's Python environment installed in `.venv`, run from the
@@ -472,8 +478,16 @@ never be presented as genuine SAFE evidence. `data/independent_scene_candidates.
 records the acquired validation and test products and their checksums. Their
 512×512 crops use the frozen development statistics. Exact K=16, seed=0 CPU/GPU
 reference fits and maps exist for the 31UFU validation crop and 30STG test crop.
-The test maps are under `outputs/20261025-test-scene-k16-exact-cap1000/` and the
-validation maps are under `outputs/20261025-validation-scene-k16-exact/`. The
+The latest all-method held-out K=16 map set is under
+`outputs/20261025-test-scene-all-method-maps/`; for example,
+`render_G0/true_color.png`, `render_G0/false_color_nir.png`,
+`render_G0/clusters.png` and `render_G0/clusters.tif` show the exact CUDA result.
+The folder also contains the corresponding C0 and approximate/adaptive method
+maps, per-method checksums and provenance. Earlier exact-only maps remain under
+`outputs/20261025-test-scene-k16-exact-cap1000/` and
+`outputs/20261025-validation-scene-k16-exact/`. These output folders are local,
+gitignored artifacts and must be preserved/backed up separately from source.
+The
 test crop has not been used to select or tune adaptive settings; do not use its
 results for tuning. A frozen K=16 test-quality evaluation now covers five seeds
 and one policy: exact C0/G0 reached the declared 5% target in 25/25 fits per
@@ -638,6 +652,25 @@ hit the cap. These target misses are retained, not relabeled as convergence or
 speedups. The held-out 30STG quality report remains frozen at K=16; no test-scene
 results were used to retune parameters. See the matrix table and per-run archive
 in [`docs/REAL_SCENE_RESULTS.md`](docs/REAL_SCENE_RESULTS.md).
+
+### Latest verified image and report figures
+
+These are existing, checksum-inventoried local artifacts (not tracked Git
+files). The main visual comparison is
+`outputs/20261024-real-evaluation/real-scene-comparison.png`. The all-method
+held-out cluster maps and RGB/NIR views are in
+`outputs/20261025-test-scene-all-method-maps/render_<METHOD>/` (including
+`clusters.tif`, `clusters.png`, `true_color.png` and `false_color_nir.png`).
+For the latest aggregate quality results, use
+`outputs/20261026-real-quality-matrix-completion/quality_target_hit_rate.png`
+with its `manifest.json` and `individual_runs.csv`. The validation K-sweep
+speedup figure is
+`outputs/20261025-validation-quality-k-sweep-summary-v2/exact_speedup_by_k.png`;
+the five-seed held-out quality-versus-time figures are
+`outputs/20261025-test-quality-k16-five-seed-summary-rebuilt/quality_seed{0..4}_{cpu,cuda}.png`.
+Their protocols differ; do not pool or compare those plots as if they were one
+measurement session. Full interpretation and limitations are in
+[`docs/REAL_SCENE_RESULTS.md`](docs/REAL_SCENE_RESULTS.md).
 
 A separate paired validation-only diagnostic compared the unchanged cumulative-
 count Mini-Batch rule with an experimental decayed-count update on identical

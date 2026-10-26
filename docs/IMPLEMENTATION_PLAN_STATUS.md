@@ -1,4 +1,4 @@
-# Implementation plan status — 26 October 2026
+# Implementation plan status — audited 26 October 2026
 
 This is an evidence-based status against `IMPLEMENTATION_PLAN.md`. “Implemented”
 describes code and tests; it does not imply that every experimental or
@@ -122,11 +122,14 @@ do not commit raw SAFE data, `.venv`, or result arrays.
 3. **Second developer environment (M0 exit evidence):** M0 specifies real-GPU
    smoke validation on both WSL installations. Samridhi's RTX 4050 is verified;
    Daksh's own WSL/Python/CUDA setup is not evidenced in this repository.
-4. **Git integration (release blocker):** review and commit the pending
-   `integration-daksh` work in scoped local commits, reconcile its upstream
-   tracking (`origin/feature-daksh`) with the intended integration branch, and
-   preserve ignored datasets/results outside Git. A reviewed push/merge to
-   `main` still requires explicit authorization.
+4. **Git publication (not yet authorized):** at this audit, the local
+   `integration-daksh` branch was clean at `5275aa1922dda97debde3f183e2d00e451f8c4a3`,
+   five commits ahead of its configured `origin/feature-daksh` tracking ref;
+   no `origin/integration-daksh` ref was present. Local `main` and
+   `samridhi-dev` were at `2e8856dc16eac4f326b28d95d73a8214219dacea`.
+   These branch observations are a dated snapshot, not a live status check.
+   Publishing the integration branch and any later merge to `main` require
+   explicit authorization. Keep ignored datasets/results backed up separately.
 
 ### Experiment coverage: complete, partial, and optional
 
@@ -168,8 +171,9 @@ do not commit raw SAFE data, `.venv`, or result arrays.
   cumulative-count `fit_minibatch_cpu`/CUDA implementations remain the named
   fixed Mini-Batch baselines; the decayed rule is separately labeled and is
   not part of the frozen held-out evaluation.
-- Before final submission, review all changed/untracked files on
-  `integration-daksh`, run the documented CPU and real-GPU suites from the
-  final source revision, check archive checksums, then create reviewable local
-  commits. Do not claim the repository is merge-ready while source changes
-  remain uncommitted or the instructor scope decision is open.
+- At the 26 October audit, the working tree was clean and all source changes
+  were committed locally; the CPU (380) and real-GPU (450) suites had passed,
+  and archived-output checksums were verified. Re-run those checks if source
+  changes after that audited commit. The instructor scope decision and kernel
+  profiling acceptance remain open, so do not describe the project as accepted
+  under the original proposal or merged into `main`.

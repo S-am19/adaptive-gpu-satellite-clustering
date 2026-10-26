@@ -1,4 +1,11 @@
-# Integration validation and results — 24 October 2026
+# Historical integration validation snapshot — 24 October 2026
+
+> **Historical snapshot, superseded for current status.** This file records the
+> state before real SAFE products were acquired and before the later CUDA,
+> OpenMP, real-scene and quality-matrix work. Its statements below are retained
+> as a dated record and must not be read as current facts. For current status,
+> see [`IMPLEMENTATION_PLAN_STATUS.md`](IMPLEMENTATION_PLAN_STATUS.md) and the
+> later [`REAL_SCENE_RESULTS.md`](REAL_SCENE_RESULTS.md).
 
 ## Acceptance status
 

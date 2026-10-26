@@ -1,5 +1,14 @@
 # PCAP Implementation Plan — Version 2.0 (Two-Developer Workflow)
 
+> **Historical proposal and acceptance baseline.** This document preserves the
+> requirements and planned workflow agreed on 20 October 2026; its original
+> pre-implementation status statements and future-tense stage descriptions are
+> not current project status. See [`docs/IMPLEMENTATION_PLAN_STATUS.md`](docs/IMPLEMENTATION_PLAN_STATUS.md)
+> for the audited implementation/evidence state and
+> [`docs/REAL_SCENE_RESULTS.md`](docs/REAL_SCENE_RESULTS.md) for the latest
+> real-scene results. Do not delete or silently rewrite this baseline; resolve
+> scope changes with the instructor.
+
 **Working title:** Adaptive GPU-Accelerated Mini-Batch K-Means for Satellite Image Clustering  
 **Status:** Agreed direction / pre-implementation; no benchmarks or completed code are claimed.  
 **Date:** 20 October 2026  
@@ -37,7 +46,7 @@ Build and experimentally evaluate a GPU-based K-Means clustering system that gro
 
 | Area | Current choice | Verification needed |
 |---|---|---|
-| Primary system | Samridhi: Windows 11 + Ubuntu 24.04 WSL2, Intel i5-13450HX, 24 GB RAM, RTX 4050 Laptop GPU / ~6 GB VRAM, CUDA compiler 12.0 detected | A custom Python GPU kernel must execute successfully; toolkit and Python bindings compatibility not yet proven |
+| Primary system | Samridhi: Windows 11 + Ubuntu 24.04 WSL2, Intel i5-13450HX, 24 GB RAM, RTX 4050 Laptop GPU / ~6 GB VRAM, CUDA compiler 12.0 detected | **At plan drafting:** custom Python GPU execution and toolkit/bindings compatibility were unverified. They were subsequently verified on Samridhi's WSL system; see `docs/IMPLEMENTATION_PLAN_STATUS.md`. Daksh's separate environment remains unverified here. |
 | Second system | Daksh reports similar hardware; ~96.9 GB free on C: and 193 GB on D: | Check exact GPU, RAM, WSL version, Linux CUDA access and Python CUDA installation on his own system |
 | Language | Python 3 in a dedicated virtual environment | Choose supported Python/package versions after read-only environment audit |
 | CPU reference | NumPy and single-worker Numba `@njit` (or equivalent optimized sequential implementation) | No parallel `prange` in the baseline; warm-JIT timing |
@@ -135,7 +144,7 @@ The real code may use device arrays internally for speed; the logical interface 
 
 ## 5. Dataset policy and preparation
 
-**Primary:** Sentinel-2 Level-2A surface reflectance, collected from Copernicus Data Space. Specific scenes are **not yet selected** and must not be invented.
+**Primary:** Sentinel-2 Level-2A surface reflectance, collected from Copernicus Data Space. **At plan drafting,** specific scenes were not yet selected. Three genuine products were later acquired and processed; see `docs/REAL_SCENE_RESULTS.md`. The scene-split and no-test-tuning requirements below remain in force.
 
 ### Initial spectral bands and sizes
 - Start with B02 (blue), B03 (green), B04 (red), B08 (NIR): all native 10 m bands, so D = 4 for the initial benchmark.
