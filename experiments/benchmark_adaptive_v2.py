@@ -115,6 +115,19 @@ def write_inventory(folder):
     (folder / "checksums.sha256").write_text("".join(entries))
 
 
+def write_measurements(path, records):
+    """Write rows whose timing dictionaries may have method-specific fields."""
+    fieldnames = []
+    for record in records:
+        for name in record:
+            if name not in fieldnames:
+                fieldnames.append(name)
+    with Path(path).open("x", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(records)
+
+
 def verify_scene(scene_dir):
     scene_dir = Path(scene_dir).resolve()
     points_path = scene_dir / "X.npy"
@@ -152,11 +165,12 @@ def result_arrays(folder, method, seed, result):
     return path.name
 
 
-def baseline_fit(method, X, C0, cfg, quality_interval, batch_policy, v2_policy):
+def baseline_fit(method, X, C0, cfg, quality_interval, batch_policy, v2_policy,
+                 observation_budget=None, quality_observation_checkpoints=()):
     if method == "G0":
         exact_cfg = FitConfig(cfg.k, cfg.seed, max(cfg.max_steps, 1000), cfg.tolerance)
         return fit_controlled(X, C0, exact_cfg, device="cuda", mode="full",
-                              evaluation_interval=quality_interval, target_sse=None)
+                              evaluation_interval=(quality_interval or 100), target_sse=None)
     if method == "A_G1":
         return fit_controlled(X, C0, cfg, device="cuda", mode="fixed",
                               evaluation_interval=quality_interval, target_sse=None)
@@ -165,10 +179,15 @@ def baseline_fit(method, X, C0, cfg, quality_interval, batch_policy, v2_policy):
                               batch_policy=batch_policy,
                               evaluation_interval=quality_interval, target_sse=None)
     if method == "C_DECAYED_FIXED":
-        return fit_decayed_minibatch_cuda(X, C0, cfg, quality_interval=quality_interval)
+        return fit_decayed_minibatch_cuda(
+            X, C0, cfg, quality_interval=quality_interval,
+            observation_budget=observation_budget,
+            quality_observation_checkpoints=quality_observation_checkpoints)
     if method == "D_ADAPTIVE_V2":
         return fit_adaptive_decayed_minibatch_cuda(
-            X, C0, cfg, policy=v2_policy, quality_interval=quality_interval)
+            X, C0, cfg, policy=v2_policy, quality_interval=quality_interval,
+            observation_budget=observation_budget,
+            quality_observation_checkpoints=quality_observation_checkpoints)
     raise ValueError(f"Unknown method: {method}")
 
 
@@ -248,7 +267,7 @@ def run_comparison(args, output, manifest):
                  + 8*((n+255)//256 + (capacity+255)//256 + 16 + 3))
     if estimated > 0.8*free:
         raise MemoryError(f"Estimated V2 resident buffers {estimated} exceed 80% of free VRAM {free}")
-    methods = list(METHODS)
+    methods = list(args.methods)
     policy_data = json.loads((ROOT/"configs/validation_tuning_policies.json").read_text())["batch"]
     batch_policy_settings = dict(policy_data)
     batch_policy_settings.update(minimum=args.minimum_batch, maximum=args.maximum_batch)
@@ -262,6 +281,8 @@ def run_comparison(args, output, manifest):
                     minimum_batch=args.minimum_batch, maximum_batch=args.maximum_batch,
                     max_steps=args.max_steps, tolerance=args.tolerance,
                     probe_interval=args.probe_interval, quality_interval=args.quality_interval,
+                    observation_budget=args.observation_budget,
+                    quality_observation_checkpoints=args.quality_observation_checkpoints,
                     quality_gap=args.quality_gap, warmups=1, measured_repeats=1,
                     decay_half_life_passes=10, target_policy="evaluation only; never passed to fit/controller"),
                     g3cuda_policy=batch_policy_settings, v2_policy=dict(
@@ -319,7 +340,11 @@ def run_comparison(args, output, manifest):
                 cuda.synchronize()
                 started = perf_counter()
                 result = baseline_fit(method, X, C0, cfg, args.quality_interval,
-                                      batch_policy, v2_policy)
+                                      batch_policy, v2_policy,
+                                      observation_budget=(args.observation_budget
+                                          if method in {"C_DECAYED_FIXED", "D_ADAPTIVE_V2"} else None),
+                                      quality_observation_checkpoints=(args.quality_observation_checkpoints
+                                          if method in {"C_DECAYED_FIXED", "D_ADAPTIVE_V2"} else ()))
                 cuda.synchronize()
                 external = perf_counter()-started
                 exact = assign_exact(X, result.centroids)
@@ -349,6 +374,7 @@ def run_comparison(args, output, manifest):
                     batch_size_transitions=changes,
                     batch_sizes=sizes,
                     quality_history=quality,
+                    update_history=result.history,
                     timings=result.timings,
                     metadata=result.metadata,
                     arrays_file=result_arrays(output, method, seed, result))
@@ -368,10 +394,7 @@ def run_comparison(args, output, manifest):
     manifest["elapsed_s"] = perf_counter()-timer_start
     manifest["completed_measured_fits"] = len(records)
     manifest["complete"] = len(records) == len(args.seeds)*len(methods)
-    with (output/"measurements.csv").open("x", newline="") as stream:
-        if records:
-            writer = csv.DictWriter(stream, fieldnames=list(records[0]))
-            writer.writeheader(); writer.writerows(records)
+    write_measurements(output/"measurements.csv", records)
     if not manifest["complete"]:
         raise RuntimeError("Comparison ended without all planned measured fits")
 
@@ -382,6 +405,7 @@ def parser():
     p.add_argument("--scene-dir", type=Path, default=DEFAULT_SCENE)
     p.add_argument("--output-dir", type=Path, required=True)
     p.add_argument("--replay-archive", type=Path, default=DEFAULT_REPLAY)
+    p.add_argument("--methods", choices=METHODS, nargs="+", default=list(METHODS))
     p.add_argument("--k", type=int, default=16)
     p.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2])
     p.add_argument("--batch-size", type=int, default=8192)
@@ -393,6 +417,10 @@ def parser():
     p.add_argument("--tolerance", type=float, default=1e-6)
     p.add_argument("--probe-interval", type=int, default=10)
     p.add_argument("--quality-interval", type=int, default=100)
+    p.add_argument("--observation-budget", type=int, default=None,
+                   help="exact per-fit processed-observation cap for decayed Mini-Batch methods")
+    p.add_argument("--quality-observation-checkpoints", type=int, nargs="*", default=[],
+                   help="full-data SSE checkpoints at shared processed-observation thresholds")
     p.add_argument("--quality-gap", type=float, default=0.05)
     p.add_argument("--budget-seconds", type=float, default=900)
     p.add_argument("--replay-rtol", type=float, default=2e-7)
@@ -407,10 +435,27 @@ def main(argv=None):
     if args.output_dir.exists():
         raise FileExistsError(f"Output directory already exists: {args.output_dir}")
     if args.mode == "compare" and (min(args.k,args.batch_size,args.maximum_batch,args.max_steps,
-            args.g0_max_steps,args.reference_steps,args.probe_interval,args.quality_interval) < 1
+            args.g0_max_steps,args.reference_steps,args.probe_interval) < 1
+            or args.quality_interval < 0
             or min(args.seeds)<0 or args.minimum_batch<1 or args.minimum_batch>args.batch_size
             or args.maximum_batch<args.batch_size or args.budget_seconds<=0):
         raise SystemExit("Invalid comparison configuration")
+    if args.mode == "compare":
+        if not args.methods:
+            raise SystemExit("At least one method must be selected")
+        if args.observation_budget is not None:
+            if args.observation_budget < 1:
+                raise SystemExit("observation budget must be positive")
+            if set(args.methods) - {"G0", "C_DECAYED_FIXED", "D_ADAPTIVE_V2"}:
+                raise SystemExit("Observation-budget comparisons support only G0 and decayed methods")
+            checkpoints = args.quality_observation_checkpoints
+            if (not checkpoints or checkpoints != sorted(set(checkpoints))
+                    or checkpoints[0] < 1 or checkpoints[-1] > args.observation_budget):
+                raise SystemExit("Provide strictly increasing positive quality checkpoints within the observation budget")
+        elif args.quality_observation_checkpoints:
+            raise SystemExit("Quality observation checkpoints require --observation-budget")
+        elif args.quality_interval == 0:
+            raise SystemExit("quality interval may be zero only with observation-budget checkpoints")
     args.output_dir.mkdir(parents=True, exist_ok=False)
     manifest = dict(created_utc=datetime.now(timezone.utc).isoformat(), mode=args.mode,
         git_head=subprocess.run(["git","rev-parse","HEAD"],cwd=ROOT,check=True,

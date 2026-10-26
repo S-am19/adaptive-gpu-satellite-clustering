@@ -7,6 +7,7 @@ quality target or exact-reference SSE.
 """
 
 from dataclasses import asdict
+import hashlib
 import math
 from time import perf_counter
 
@@ -210,24 +211,31 @@ class _DecayedDeviceState:
 
 
 def fit_decayed_minibatch_cuda(X, C0, config, *, quality_interval=100,
-                               batch_indices=None) -> RunResult:
+                               batch_indices=None, observation_budget=None,
+                               quality_observation_checkpoints=()) -> RunResult:
     """Fixed-batch experimental decayed-count CUDA Mini-Batch fit.
 
     ``batch_indices`` optionally supplies a reproducible replay stream shaped
     ``[max_steps, batch_size]``. Quality checks never influence fitting.
     """
     return _fit(X, C0, config, policy=None, adaptive=False,
-                quality_interval=quality_interval, batch_indices=batch_indices)
+                quality_interval=quality_interval, batch_indices=batch_indices,
+                observation_budget=observation_budget,
+                quality_observation_checkpoints=quality_observation_checkpoints)
 
 
 def fit_adaptive_decayed_minibatch_cuda(X, C0, config, *, policy=None,
-                                        quality_interval=100) -> RunResult:
+                                        quality_interval=100, observation_budget=None,
+                                        quality_observation_checkpoints=()) -> RunResult:
     """Experimental Adaptive V2; the controller sees probe signals only."""
     return _fit(X, C0, config, policy=policy, adaptive=True,
-                quality_interval=quality_interval, batch_indices=None)
+                quality_interval=quality_interval, batch_indices=None,
+                observation_budget=observation_budget,
+                quality_observation_checkpoints=quality_observation_checkpoints)
 
 
-def _fit(X, C0, config, *, policy, adaptive, quality_interval, batch_indices):
+def _fit(X, C0, config, *, policy, adaptive, quality_interval, batch_indices,
+         observation_budget, quality_observation_checkpoints):
     wall_start = perf_counter()
     if adaptive and policy is None:
         if not isinstance(config, FitConfig):
@@ -236,7 +244,25 @@ def _fit(X, C0, config, *, policy, adaptive, quality_interval, batch_indices):
             raise ValueError("batch_size must be supplied for adaptive Mini-Batch")
         policy = AdaptiveV2Policy.for_run(len(X), int(config.batch_size))
     capacity = _validate_fit(X, C0, config, policy, batch_indices)
-    validate_integer("quality_interval", quality_interval)
+    if isinstance(quality_interval, (bool, np.bool_)) or not isinstance(quality_interval, (int, np.integer)):
+        raise TypeError("quality_interval must be an integer")
+    if quality_interval < 0:
+        raise ValueError("quality_interval must be nonnegative")
+    if observation_budget is not None:
+        validate_integer("observation_budget", observation_budget)
+        if observation_budget > int(config.max_steps) * capacity:
+            raise ValueError("observation_budget exceeds the configured update capacity")
+    checkpoints = tuple(quality_observation_checkpoints)
+    previous_checkpoint = 0
+    for checkpoint in checkpoints:
+        validate_integer("quality observation checkpoint", checkpoint)
+        if checkpoint <= previous_checkpoint:
+            raise ValueError("quality observation checkpoints must be strictly increasing")
+        if observation_budget is not None and checkpoint > observation_budget:
+            raise ValueError("quality checkpoint exceeds observation_budget")
+        if checkpoint > int(config.max_steps) * capacity:
+            raise ValueError("quality checkpoint exceeds configured observation capacity")
+        previous_checkpoint = checkpoint
     if cuda.config.ENABLE_CUDASIM or not cuda.is_available():
         raise RuntimeError("Adaptive V2 requires real CUDA; simulator or CPU fallback is unsupported")
     n, _ = X.shape
@@ -262,14 +288,18 @@ def _fit(X, C0, config, *, policy, adaptive, quality_interval, batch_indices):
     confirmation_objective = None
     history, quality_history = [], []
     observations = 0
+    completed_steps = 0
     sampling_s = assignment_s = update_s = monitoring_s = controller_s = quality_s = 0.0
+    sampling_provenance_s = 0.0
+    next_quality_checkpoint = 0
 
-    def record_quality(step):
+    def record_quality(step, reached_budgets=()):
         started = perf_counter()
         objective = state.quality()
         elapsed = perf_counter() - started
         quality_history.append(dict(step=step, elapsed_s=perf_counter()-wall_start,
-                                   full_data_sse=objective, points_processed=observations))
+                                   full_data_sse=objective, points_processed=observations,
+                                   observation_budgets_reached=list(reached_budgets)))
         return elapsed, objective
 
     if quality_interval:
@@ -281,16 +311,24 @@ def _fit(X, C0, config, *, policy, adaptive, quality_interval, batch_indices):
     batch_rng = rng
     previous_probe_sse = initial_probe_sse
     for step in range(1, total+1):
+        if observation_budget is not None and observations >= observation_budget:
+            break
         batch = int(controller_state.batch_size) if adaptive else int(config.batch_size)
+        if observation_budget is not None:
+            batch = min(batch, observation_budget - observations)
         phase = "confirmation" if confirming else "adapting" if adaptive else "fixed"
         start = perf_counter()
         if batch_indices is None:
             sampled = _sample_batch_indices(batch_rng, n, batch)
         else:
             if batch != int(config.batch_size):
-                raise ValueError("batch-index replay is supported only for fixed-batch fits")
-            sampled = batch_indices[step-1]
+                if batch > int(config.batch_size):
+                    raise ValueError("batch-index replay batch exceeds configured width")
+            sampled = batch_indices[step-1, :batch]
         sampling_s += perf_counter()-start
+        start = perf_counter()
+        sample_hash = hashlib.sha256(np.ascontiguousarray(sampled, dtype=np.int32).view(np.uint8)).hexdigest()
+        sampling_provenance_s += perf_counter()-start
         start = perf_counter()
         batch_sse, active_batch = state.assign(sampled)
         assignment_s += perf_counter()-start
@@ -301,6 +339,7 @@ def _fit(X, C0, config, *, policy, adaptive, quality_interval, batch_indices):
         observations += active_batch
         row = dict(step=step, phase=phase, batch_size=active_batch,
                    next_batch_size=batch, points_processed=observations,
+                   sample_indices_sha256=sample_hash,
                    centroid_displacement=movement, forgetting_factor=decay,
                    batch_sse_before_update=batch_sse,
                    objective_scope="sample only, assigned at pre-update centroids",
@@ -360,11 +399,18 @@ def _fit(X, C0, config, *, policy, adaptive, quality_interval, batch_indices):
                        convergence_satisfied=converged)
             controller_s += perf_counter()-start
         history.append(row)
-        if quality_interval and step % int(quality_interval) == 0:
-            elapsed, _ = record_quality(step)
+        completed_steps = step
+        reached = []
+        while (next_quality_checkpoint < len(checkpoints) and
+               observations >= checkpoints[next_quality_checkpoint]):
+            reached.append(checkpoints[next_quality_checkpoint])
+            next_quality_checkpoint += 1
+        if reached or (quality_interval and step % int(quality_interval) == 0):
+            elapsed, _ = record_quality(step, reached)
             quality_s += elapsed
         if converged:
             break
+    step = completed_steps
     if not quality_history or quality_history[-1]["step"] != step:
         elapsed, _ = record_quality(step)
         quality_s += elapsed
@@ -379,8 +425,12 @@ def _fit(X, C0, config, *, policy, adaptive, quality_interval, batch_indices):
         execution_device="cuda", gpu=str(state.device.name),
         config=asdict(config), policy=asdict(policy) if adaptive else None,
         final_exact_sse=final_sse, steps=step,
-        termination_reason="tolerance" if converged else "max_steps",
+        termination_reason=("tolerance" if converged else
+                            "observation_budget" if observation_budget is not None
+                            and observations >= observation_budget else "max_steps"),
         convergence_satisfied=converged,
+        observation_budget_reached=(observation_budget is not None
+                                    and observations >= observation_budget),
         stopping_rule="three stable adapting probes then three fresh frozen maximum-batch checks" if adaptive else "three stable fixed-probe checks",
         probe_indices=probe_indices.tolist(), probe_size=probe_size,
         probe_checks=probe_checks, controller_calls=controller_calls,
@@ -391,21 +441,25 @@ def _fit(X, C0, config, *, policy, adaptive, quality_interval, batch_indices):
         observation_counts_include_C0=False,
         sampling_policy="uniform without replacement per batch; independent draws across steps" if batch_indices is None else "caller-supplied replay indices",
         sampling_rng=rng_name, probe_rng="numpy.default_rng(SeedSequence([seed,1]))",
+        sampling_index_provenance="SHA256 of contiguous int32 point indices for every recorded update",
         decay_rule="lambda_t=0.5**(actual_batch_size/(10*N)); S=lambda_t*S+batch_sum; W=lambda_t*W+batch_count",
         decay_half_life_passes=10,
         empty_cluster_policy="retain previous centroid when effective count is zero",
         tie_policy="lowest_index", initialization="provided_C0",
         centroid_dtype="float32", accumulation_dtype="float64",
         quality_history=quality_history, quality_evaluation_points=len(quality_history)*n,
+        observation_budget=observation_budget,
+        quality_observation_checkpoints=list(checkpoints),
         controller_signals="fixed-probe mean squared distance, relative probe trend, normalized centroid movement and probe label changes; no quality target/reference supplied",
         history_objective_policy="batch/probe metrics separate; exact full-data SSE in quality_history and final_exact_sse",
         estimated_device_buffer_bytes=state.estimated_bytes,
         timing_scope="host wall and component scopes; full-data quality evaluations included; components are subsets, do not add to wall_s",
     )
-    timings = dict(sampling_s=sampling_s, batch_assignment_s=assignment_s,
+    timings = dict(sampling_s=sampling_s, sampling_provenance_s=sampling_provenance_s,
+                   batch_assignment_s=assignment_s,
                    accumulation_update_s=update_s, monitoring_s=monitoring_s,
                    controller_s=controller_s, quality_evaluation_s=quality_s,
                    final_assignment_s=final_assignment_s,
-                   compute_s=sampling_s+assignment_s+update_s+monitoring_s+controller_s+quality_s+final_assignment_s,
+                   compute_s=sampling_s+sampling_provenance_s+assignment_s+update_s+monitoring_s+controller_s+quality_s+final_assignment_s,
                    wall_s=perf_counter()-wall_start)
     return RunResult(centroids, labels, history, timings, metadata)

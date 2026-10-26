@@ -162,6 +162,14 @@ def test_adaptive_v2_changes_batch_without_resetting_effective_counts(real_cuda)
     assert result.metadata["controller_signals"].find("full-data") == -1
     assert "target_sse" not in result.metadata
     assert result.metadata["execution_device"] == "cuda"
+    for row in result.history:
+        assert len(row["sample_indices_sha256"]) == 64
+        if row["convergence_checked"]:
+            assert "probe_sse" in row and "probe_label_change_fraction" in row
+            assert "normalized_checkpoint_displacement" in row
+            if row["controller_decision"] is not None:
+                assert "controller_state_before" in row
+                assert "controller_state_after" in row
 
 
 def test_adaptive_v2_does_not_accept_evaluation_target(real_cuda):
@@ -183,3 +191,47 @@ def test_replay_index_validation(real_cuda, bad_samples):
     cfg = config(2, 2, steps=2)
     with pytest.raises(ValueError):
         fit_decayed_minibatch_cuda(points, initial, cfg, batch_indices=bad_samples)
+
+
+def test_fixed_observation_budget_records_shared_quality_checkpoints(real_cuda):
+    rng = np.random.default_rng(3001)
+    points = np.ascontiguousarray(rng.normal(size=(40, 3)), dtype=np.float32)
+    initial = points[[0, 13, 27]].copy()
+    cfg = config(3, 8, steps=5, seed=11, probe=10)
+    result = fit_decayed_minibatch_cuda(
+        points, initial, cfg, quality_interval=0, observation_budget=17,
+        quality_observation_checkpoints=(8, 16))
+    assert result.metadata["points_processed"] == 17
+    assert result.metadata["steps"] == 3
+    assert result.metadata["quality_history"][-1]["step"] == 3
+    assert [row["batch_size"] for row in result.history] == [8, 8, 1]
+    assert [row["sample_indices_sha256"] for row in result.history]
+    milestones = [row for row in result.metadata["quality_history"]
+                  if row["observation_budgets_reached"]]
+    assert [(row["points_processed"], row["observation_budgets_reached"])
+            for row in milestones] == [(8, [8]), (16, [16])]
+    assert result.metadata["observation_budget"] == 17
+    assert result.metadata["observation_budget_reached"] is True
+    assert result.metadata["termination_reason"] == "observation_budget"
+    assert result.metadata["convergence_satisfied"] is False
+    assert result.metadata["quality_evaluation_points"] == 3 * len(points)
+
+
+def test_adaptive_observation_budget_truncates_terminal_batch_and_logs_history(real_cuda):
+    points = np.zeros((32, 2), dtype=np.float32)
+    initial = points[[0]].copy()
+    cfg = config(1, 2, steps=5, seed=7, probe=10)
+    policy = AdaptiveV2Policy(minimum=2, maximum=8, initial_batch=2)
+    result = fit_adaptive_decayed_minibatch_cuda(
+        points, initial, cfg, policy=policy, quality_interval=0,
+        observation_budget=9, quality_observation_checkpoints=(4, 8))
+    assert result.metadata["points_processed"] == 9
+    assert [row["batch_size"] for row in result.history] == [2, 2, 2, 2, 1]
+    assert [row["points_processed"] for row in result.history] == [2, 4, 6, 8, 9]
+    assert [(row["points_processed"], row["observation_budgets_reached"])
+            for row in result.metadata["quality_history"]
+            if row["observation_budgets_reached"]] == [(4, [4]), (8, [8])]
+    assert result.metadata["termination_reason"] == "observation_budget"
+    assert result.metadata["observation_budget_reached"] is True
+    assert result.metadata["convergence_satisfied"] is False
+    assert result.history[-1]["sample_indices_sha256"]
