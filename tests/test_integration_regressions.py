@@ -426,3 +426,98 @@ def test_history_plots_and_no_figure_overwrite(tmp_path,monkeypatch):
     monkeypatch.setattr(sys,'argv',['plots','--csv',str(csv),'--output-dir',str(tmp_path)])
     with pytest.raises(FileExistsError):
         plots.main()
+
+
+def test_multiscene_summary_never_pools_equal_shapes(tmp_path):
+    import pandas as pd
+    summary=module('experiments/summarize_suite.py')
+    rows=[]
+    for dataset in ('train','test'):
+        for method in ('C0','G0'):
+            rows.append(dict(dataset_id=dataset,case_id=dataset,session_id='one',method=method,
+                implementation=method,n=8,d=4,k=2,seed=0,wall_time_s=1.,final_exact_sse=10.,
+                steps=2,termination_reason='max_steps',convergence_satisfied=False,points_processed=16))
+    file=tmp_path/'data.csv';pd.DataFrame(rows).to_csv(file,index=False)
+    result=summary.summarize(file,tmp_path/'summaries')
+    assert len(result)==4
+    assert all(result.repeats==1)
+
+
+def test_declarative_prep_reuses_frozen_statistics_and_rejects_fake_holdout(safe_scene,tmp_path):
+    prepare=module('scripts/prepare_study.py')
+    cfg={'products':{'a':{'path':str(safe_scene),'product_id':'TEST.SAFE'}},
+         'crops':[dict(id='train',product='a',window=[0,0,4,4],split='train')]}
+    file=tmp_path/'study.json';file.write_text(json.dumps(cfg))
+    out=prepare.prepare(file,tmp_path/'prepared')
+    saved=(out/'standardization_stats.json').read_bytes()
+    cfg['crops'][0].update(id='spatial',split='spatial_test')
+    file.write_text(json.dumps(cfg))
+    new=prepare.prepare(file,tmp_path/'frozen',stats_path=out/'standardization_stats.json')
+    assert (new/'standardization_stats.json').read_bytes()==saved
+    cfg['crops'].append(dict(id='test',product='a',window=[0,0,4,4],split='test'))
+    file.write_text(json.dumps(cfg))
+    with pytest.raises(ValueError,match='independent'):
+        prepare.prepare(file,tmp_path/'bad',stats_path=out/'standardization_stats.json')
+
+
+def test_quality_runner_records_target_status_and_checksums(tmp_path):
+    from types import SimpleNamespace
+    import importlib
+    # Load through the script's normal import path; no CUDA requested.
+    runner=module('experiments/benchmark_quality.py')
+    scene=tmp_path/'scene';scene.mkdir();X=np.array([[0],[1],[20],[21]],np.float32)
+    np.save(scene/'X.npy',X)
+    import hashlib
+    (scene/'metadata.json').write_text(json.dumps(dict(X_sha256=hashlib.sha256(X.tobytes()).hexdigest())))
+    out=runner.main(['--scene-dir',str(scene),'--output-dir',str(tmp_path/'study'),'--methods','C0','C1',
+        '--k','2','--seeds','0','--max-steps','10','--reference-steps','30','--warmups','1','--repeats','1','--evaluation-interval','1'])
+    m=json.loads((out/'manifest.json').read_text());assert m['complete'] and m['completed_measured_fits']==2
+    raw=[json.loads(s) for s in (out/'raw.jsonl').read_text().splitlines()]
+    assert all(r['metadata']['quality_history'] for r in raw)
+    for line in (out/'checksums.sha256').read_text().splitlines():
+        expected,name=line.split('  ',1);assert hashlib.sha256((out/name).read_bytes()).hexdigest()==expected
+
+
+def test_quality_runner_applies_and_records_frozen_policy_json(tmp_path):
+    runner=module('experiments/benchmark_quality.py')
+    scene=tmp_path/'scene';scene.mkdir();X=np.array([[0],[1],[20],[21]],np.float32)
+    np.save(scene/'X.npy',X)
+    import hashlib
+    (scene/'metadata.json').write_text(json.dumps(dict(X_sha256=hashlib.sha256(X.tobytes()).hexdigest())))
+    policy=tmp_path/'policy.json'
+    policy.write_text(json.dumps({'batch':{'minimum':2,'maximum':4,'quiet_checkpoints':2}}))
+    out=runner.main(['--scene-dir',str(scene),'--output-dir',str(tmp_path/'study-policy'),
+        '--methods','C0','G3','--k','2','--seeds','0','--max-steps','2','--reference-steps','30',
+        '--batch-size','2','--warmups','1','--repeats','1','--evaluation-interval','1',
+        '--probe-interval','1','--policy-json',str(policy)])
+    manifest=json.loads((out/'manifest.json').read_text())
+    assert manifest['policy_settings']['batch']['minimum']==2
+    records=[json.loads(line) for line in (out/'raw.jsonl').read_text().splitlines()]
+    adaptive=next(row for row in records if row['method']=='G3')
+    assert adaptive['metadata']['batch_policy']['minimum']==2
+    assert adaptive['metadata']['batch_policy']['maximum']==4
+
+
+def test_quality_runner_rejects_ambiguous_policy_effort(tmp_path):
+    runner=module('experiments/benchmark_quality.py')
+    policy=tmp_path/'policy.json';policy.write_text(json.dumps({'ann_cuda':{'levels':[16,8,4,1],'initial_effort':16}}))
+    with pytest.raises(SystemExit):
+        runner.main(['--scene-dir',str(tmp_path/'missing-scene'),'--output-dir',str(tmp_path/'out'),
+                     '--policy-json',str(policy),'--ann-effort','4'])
+    assert not (tmp_path/'out').exists()
+
+
+def test_gpu_variant_names_preserve_cpu_prototypes():
+    suite=module('experiments/run_suite.py')
+    assert suite.METHODS['G2']=='cpu_minibatch_ann'
+    assert suite.METHODS['G4']=='cpu_adaptive_ann'
+    assert suite.METHODS['G5']=='cpu_adaptive_combined'
+    assert all(suite.METHODS[m].startswith('cuda_') for m in ('G2CUDA','G4CUDA','G5CUDA'))
+
+
+def test_policy_cli_validation_precedes_output_creation(tmp_path):
+    suite=module('experiments/run_suite.py')
+    bad=tmp_path/'bad.json';bad.write_text(json.dumps({'ann_cuda':{'levels':[8,4],'initial_effort':3}}))
+    with pytest.raises(ValueError):
+        suite.main(['--methods','C0','--sizes','8','--k','1','--seeds','0','--policy-json',str(bad),'--output-dir',str(tmp_path/'out')])
+    assert not (tmp_path/'out').exists()

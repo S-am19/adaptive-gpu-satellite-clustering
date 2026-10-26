@@ -1,0 +1,33 @@
+{
+  "protocol_status": "frozen candidate before held-out variant evaluation; not a validated quality policy",
+  "validation_basis": {
+    "scene": "31UFU validation crop",
+    "seed": 0,
+    "quality_target_gap": 0.05,
+    "batch_size_comparison": {
+      "8192_final_exact_sse": 30249.8022877513,
+      "65536_final_exact_sse": 30380.61545415055,
+      "decision": "Use 8192 as a holdout candidate because the validation pilot had lower SSE and lower observed median time than 65536; these were separate sessions and do not establish a general speed ordering."
+    },
+    "controller_observation": "G3CUDA stayed at 8192 with active decisions for 100 checkpoints; adaptation benefit was not demonstrated."
+  },
+  "fit": {
+    "k": 16,
+    "seed": 0,
+    "max_steps": 1000,
+    "tolerance": 1e-6,
+    "batch_size": 8192,
+    "probe_interval": 10,
+    "evaluation_interval": 50,
+    "warmups": 2,
+    "repeats": 5,
+    "quality_gap": 0.05,
+    "budget_seconds": 120
+  },
+  "policy_file": "configs/validation_tuning_policies.json",
+  "methods": [
+    "C0", "C1", "G0", "G1", "G2", "G3", "G4", "G5",
+    "G2CUDA", "G3CUDA", "G4CUDA", "G5CUDA"
+  ],
+  "holdout_rule": "Do not change methods, batch settings, ANN levels, stopping rules, or target after examining test results."
+}

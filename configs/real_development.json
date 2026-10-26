@@ -1,0 +1,16 @@
+{
+  "products": {
+    "development": {
+      "path": "data/raw/20240625-31UFS/S2A_MSIL2A_20240625T103631_N0510_R008_T31UFS_20240625T164350.SAFE",
+      "product_id": "S2A_MSIL2A_20240625T103631_N0510_R008_T31UFS_20240625T164350.SAFE"
+    }
+  },
+  "max_crop_pixels": 4194304,
+  "fit_statistics_on": ["maastricht512"],
+  "crops": [
+    {"id":"maastricht512","product":"development","window":[6084,8679,512,512],"split":"train"},
+    {"id":"maastricht1024","product":"development","window":[5828,8423,1024,1024],"split":"train"},
+    {"id":"maastricht2048","product":"development","window":[5316,7911,2048,2048],"split":"train"},
+    {"id":"hasselt512","product":"development","window":[5281,6117,512,512],"split":"spatial_test"}
+  ]
+}

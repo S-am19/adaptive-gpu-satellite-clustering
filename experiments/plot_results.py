@@ -153,7 +153,7 @@ def plot_histories(raw_path, output_dir):
     import json
     for line in Path(raw_path).read_text().splitlines():
         row = json.loads(line)
-        if row["phase"] != "measured" or row["repeat"] != 0 or row["method"] not in ("G3", "G4", "G5", "G3CUDA"):
+        if row["phase"] != "measured" or row["repeat"] != 0 or row["method"] not in ("G3", "G4", "G5", "G3CUDA", "G4CUDA", "G5CUDA"):
             continue
         h = row["history"]
         fig, axes = plt.subplots(2, 1, sharex=True)
@@ -195,14 +195,14 @@ def main():
     print(f"Loaded {len(df)} experiment rows from {csv_path}")
 
     # Never pool sizes, dimensions, K or seeds into one misleading comparison.
-    group_columns = [c for c in ("n", "d", "k", "seed") if c in df]
+    group_columns = [c for c in ("dataset_id", "case_id", "session_id", "n", "d", "k", "seed") if c in df]
     if "implementation" in df:
         df = df.copy()
         df["method"] = df["method"] + " (" + df["implementation"] + ")"
     groups = df.groupby(group_columns) if group_columns else [((), df)]
     for key, group in groups:
         key = key if isinstance(key, tuple) else (key,)
-        suffix = "_".join(f"{c}{v}" for c, v in zip(group_columns, key)) or "results"
+        suffix = "_".join(f"{c}{str(v)[:12]}" for c, v in zip(group_columns, key)) or "results"
         plot_quality_vs_time(group, out_dir / f"quality_vs_time_{suffix}.png")
         plot_throughput_bars(group, out_dir / f"throughput_comparison_{suffix}.png")
         plot_ablation_comparison(group, out_dir / f"ablation_comparison_{suffix}.png")
