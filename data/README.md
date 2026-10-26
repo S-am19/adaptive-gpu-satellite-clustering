@@ -47,4 +47,14 @@ This ensures:
 `scene_splits.json` must map every input directory name to `train`, `validation`,
 or `test`. Exactly one training scene is supported. Asset discovery rejects
 multiple granules, duplicate assets, mismatched acquisition prefixes and tile
-metadata substituted for product calibration. No real scene execution is claimed.
+metadata substituted for product calibration. The genuine 31UFS development
+product and independent 31UFU validation and 30STG test products have been
+acquired and their selected 512×512 crops preprocessed; see
+[`../docs/REAL_SCENE_RESULTS.md`](../docs/REAL_SCENE_RESULTS.md). The two
+independent products passed archive CRC, product identity, calibration, band/SCL
+grid and frozen-standardization checks. Both independent crops have exact K=16,
+seed=0 CPU/GPU baseline maps. The validation fits converged in 138 updates
+(SSE 24,395.035); the test fits converged in 406 updates (SSE 32,485.553).
+Labels and centroids matched within each CPU/GPU pair. The test crop is reserved
+from hyperparameter tuning; Mini-Batch, ANN, and adaptive test evaluation remain
+pending a validation policy freeze.
