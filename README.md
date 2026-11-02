@@ -709,3 +709,32 @@ The instructor scope question remains unanswered; see
 [`docs/INSTRUCTOR_CLARIFICATION.md`](docs/INSTRUCTOR_CLARIFICATION.md). The
 current gate-by-gate status and items needed before final submission are in
 [`docs/IMPLEMENTATION_PLAN_STATUS.md`](docs/IMPLEMENTATION_PLAN_STATUS.md).
+
+### Adaptive V2 confirmation-scene cluster maps
+
+The November 1 confirmation archive stores fit features for a deterministic
+sample of a larger crop. To visualize the saved model across the complete crop,
+run:
+
+```bash
+LD_LIBRARY_PATH=/usr/lib/wsl/lib PYTHONPATH=src NUMBA_ENABLE_CUDASIM=0 \
+  .venv/bin/python -B scripts/render_adaptive_v2_confirmation.py \
+  --study-dir outputs/20261101-independent-confirmation-study \
+  --output-dir outputs/20261102-adaptive-v2-visualization-reproduction
+```
+
+The command reloads the original June 28 SAFE using the archived window,
+calibration and development-fitted standardization. It refuses to render unless
+the reconstructed full-scene mask and sampled feature rows match the saved
+confirmation inputs exactly. It then loads the saved seed-0/repeat-0 Adaptive
+V2 and exact CUDA centroids and assigns every valid crop pixel exactly; it does
+not refit either model. The maps are labeled separately. Their sampled-fit SSE
+remains the archived experiment metric and is distinguished from the diagnostic
+SSE of assigning all crop pixels. GeoTIFFs retain the recorded CRS, transform
+and nodata mask. Outputs and checksums are written only to a new directory; an
+existing output path is rejected. The generated directory contains the paired
+PNG maps, RGB/NIR renderings, aligned cluster GeoTIFFs, provenance and
+`checksums.sha256`.
+The verified generated maps from this run are in
+`outputs/20261102-adaptive-v2-visualization/`; choose another new output
+directory when reproducing because the renderer refuses to overwrite results.

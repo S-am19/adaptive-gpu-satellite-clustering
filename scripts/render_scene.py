@@ -43,7 +43,8 @@ def render(scene_dir, model_dir, output_dir):
         stats = meta['standardization']
         reflectance = reflectance*np.asarray(stats['scale'])+np.asarray(stats['mean'])
     output_dir.mkdir(parents=True, exist_ok=False)
-    render_cluster_map(labels, mask, indices, output_dir/'clusters.png')
+    render_cluster_map(labels, mask, indices, output_dir/'clusters.png',
+                       title=result.get('map_title', 'Satellite pixel cluster IDs'))
     grid = np.full(mask.shape, -1, np.int32)
     grid.ravel()[indices] = labels
     geometry = meta['crop_grid']
