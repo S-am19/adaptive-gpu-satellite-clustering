@@ -1,0 +1,58 @@
+{
+  "protocol_status": "frozen from validation before this held-out variant evaluation; candidate settings missed the validation 5% quality target",
+  "validation_basis": {
+    "scene": "31UFU validation crop",
+    "seed": 0,
+    "quality_target_gap": 0.05,
+    "batch_policy_comparison": {
+      "fixed_8192_sse_at_5000": 28276.137,
+      "adaptive_default_sse_at_5000": 29978.499,
+      "adaptive_conservative_sse_at_5000": 28836.908,
+      "decision": "For the held-out candidate, retain minimum batch 4096 and require ten quiet checkpoints before each decrease. This improved validation quality versus the default adaptive policy but remained worse than fixed 8192 and missed the target."
+    }
+  },
+  "fit": {
+    "k": 16,
+    "seed": 0,
+    "max_steps": 1000,
+    "tolerance": 1e-6,
+    "batch_size": 8192,
+    "probe_interval": 10,
+    "evaluation_interval": 50,
+    "warmups": 2,
+    "repeats": 5,
+    "quality_gap": 0.05,
+    "budget_seconds_per_execution_device_group": 600
+  },
+  "policy_settings": {
+    "batch": {
+      "minimum": 4096,
+      "maximum": 65536,
+      "deterioration": 0.01,
+      "quiet_movement": 0.001,
+      "quiet_label_change": 0.005,
+      "quiet_objective_change": 0.001,
+      "oscillation_change": 0.001,
+      "quiet_checkpoints": 10
+    },
+    "ann_cpu": {
+      "levels": [64, 32, 16, 8],
+      "initial_effort": 64,
+      "deterioration": 0.01,
+      "quiet_checkpoints": 3
+    },
+    "ann_cuda": {
+      "levels": [16, 8, 4, 1],
+      "initial_effort": 8,
+      "deterioration": 0.01,
+      "quiet_checkpoints": 3
+    }
+  },
+  "policy_json": "configs/holdout_k16_conservative_policies.json",
+  "methods": [
+    "C0", "C1", "G0", "G1", "G2", "G3", "G4", "G5",
+    "G2CUDA", "G3CUDA", "G4CUDA", "G5CUDA"
+  ],
+  "execution_schedule": "CPU methods C0,C1,G2,G3,G4,G5 and CUDA methods G0,G1,G2CUDA,G3CUDA,G4CUDA,G5CUDA run in separate interleaved groups. Do not compare their timings across groups.",
+  "holdout_rule": "Do not tune methods, policy settings, stopping rules, or target using test results."
+}

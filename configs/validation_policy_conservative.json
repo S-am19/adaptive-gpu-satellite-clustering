@@ -1,0 +1,12 @@
+{
+  "batch": {
+    "minimum": 4096,
+    "maximum": 65536,
+    "deterioration": 0.01,
+    "quiet_movement": 0.001,
+    "quiet_label_change": 0.005,
+    "quiet_objective_change": 0.001,
+    "oscillation_change": 0.001,
+    "quiet_checkpoints": 10
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "products": {
+    "validation": {
+      "path": "data/raw/independent-scenes/validation/S2B_MSIL2A_20240720T103629_N0510_R008_T31UFU_20240720T121155.SAFE",
+      "product_id": "S2B_MSIL2A_20240720T103629_N0510_R008_T31UFU_20240720T121155.SAFE"
+    },
+    "test": {
+      "path": "data/raw/independent-scenes/test/S2A_MSIL2A_20240604T110621_N0510_R137_T30STG_20240604T171851.SAFE",
+      "product_id": "S2A_MSIL2A_20240604T110621_N0510_R137_T30STG_20240604T171851.SAFE"
+    }
+  },
+  "max_crop_pixels": 262144,
+  "fit_statistics_on": [],
+  "crops": [
+    {
+      "id": "validation512",
+      "product": "validation",
+      "window": [8192, 5888, 512, 512],
+      "split": "validation"
+    },
+    {
+      "id": "test512",
+      "product": "test",
+      "window": [1280, 6144, 512, 512],
+      "split": "test"
+    }
+  ]
+}

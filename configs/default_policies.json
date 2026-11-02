@@ -1,0 +1,5 @@
+{
+  "batch": {"quiet_movement":0.001,"quiet_label_change":0.005,"quiet_objective_change":0.001,"deterioration":0.01,"quiet_checkpoints":3},
+  "ann_cpu": {"levels":[64,32,16,8],"initial_effort":64,"deterioration":0.01,"quiet_checkpoints":3},
+  "ann_cuda": {"levels":[64,32,16,8,4,1],"initial_effort":16,"deterioration":0.01,"quiet_checkpoints":3}
+}

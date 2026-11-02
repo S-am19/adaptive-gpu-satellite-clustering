@@ -1,6 +1,12 @@
 # adaptive-gpu-satellite-clustering
 GPU-accelerated adaptive Mini-Batch K-Means for satellite image clustering using Python and CUDA
 
+The original [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md) is retained as
+the proposal and acceptance baseline; its pre-implementation status wording is
+historical. Current gates and evidence are summarized in
+[`docs/IMPLEMENTATION_PLAN_STATUS.md`](docs/IMPLEMENTATION_PLAN_STATUS.md), with
+chronological real-scene results in [`docs/REAL_SCENE_RESULTS.md`](docs/REAL_SCENE_RESULTS.md).
+
 ## CUDA smoke test (M0)
 
 With the project's Python environment installed in `.venv`, run from the
@@ -259,8 +265,9 @@ Run synthetic tests without satellite data:
 ```
 
 The synthetic preprocessing suite requires Rasterio for CRS validation, including
-tests that pass NumPy arrays. Real SAFE/XML/JP2 integration remains a separate
-validation step; these tests do not download satellite data.
+tests that pass NumPy arrays. The tests do not download satellite data. A genuine
+baseline-05.10 SAFE/JP2 product was separately validated; see
+`docs/REAL_SCENE_RESULTS.md`.
 
 Masked NumPy band arrays retain their masks, combined with explicit band masks,
 DN/special-value checks and SCL exclusions. Masked SCL cells become no-data
@@ -407,3 +414,327 @@ and missed rare clusters can still cause premature heuristic stopping. Neither
 probe stability nor final exact evaluation proves full-data convergence. Tune
 policies on development data before any held-out evaluation; compare quality,
 processed observations and full runtime rather than equal update counts alone.
+
+## Reproducible integration workflow (October 2026)
+
+The integrated code is developed on `integration-daksh`. `requirements-lock.txt`
+records the entire tested Python 3.12.3 environment, including NumPy 2.2.6,
+Numba 0.65.1, numba-cuda 0.30.4, HNSW 0.8.0, Rasterio 1.5.1,
+Matplotlib 3.11.2 and pandas 3.1.0. On a **new** environment, after approving
+installation, use `python3.12 -m venv .venv` then
+`.venv/bin/python -m pip install -r requirements-lock.txt` and
+`.venv/bin/python -m pip check`. HNSW may need a C++ compiler and Python 3.12
+headers to build; do not change system packages or an existing validated
+installation automatically. Rasterio wheels bundle GDAL; no system GDAL install
+is required. Use the WSL NVIDIA driver bridge; never install Linux GPU drivers
+inside WSL. The lock records this environment, not universal platform support.
+
+Algorithm execution in the integrated runner is explicit:
+
+| ID | Implementation | Execution |
+|---|---|---|
+| C0 | Full Lloyd reference | Sequential CPU |
+| C1 | Fixed Mini-Batch, exact assignment | Sequential CPU, explicit opt-in |
+| G0 | Custom exact full Lloyd | CUDA GPU |
+| G1 | Fixed Mini-Batch, exact assignment | CUDA GPU |
+| G2 | Fixed Mini-Batch + HNSW | CPU prototype |
+| G3 | Adaptive batch, exact assignment | CPU prototype |
+| G4 | Fixed batch + adaptive HNSW effort | CPU prototype |
+| G5 | Joint adaptive batch/HNSW effort | CPU prototype |
+| G3CUDA | Adaptive batch, exact assignment | CUDA GPU, explicit opt-in |
+| G2CUDA | Fixed batch + projection-window ANN | CUDA GPU, explicit opt-in |
+| G4CUDA | Fixed batch + adaptive projection effort | CUDA GPU, explicit opt-in |
+| G5CUDA | Adaptive batch + projection effort | CUDA GPU, explicit opt-in |
+| O0 | Full Lloyd, C++ OpenMP | CPU, explicit opt-in |
+
+G3CUDA calls `pcap.adaptive_cuda.fit_adaptive_minibatch_cuda`. It preserves
+GPU-resident cumulative sums/counts, centroids and input points across size
+changes; only sampled indices, monitoring data and final results cross the bus.
+Buffers are sized once for the maximum batch, with active slices. It uses the
+same controller/checkpoint/confirmation rules as the CPU adaptive baseline,
+including three fresh frozen maximum-batch confirmation checks. It rejects CUDA
+simulation/unavailable devices, and requires float64-atomic support. Host timings
+include synchronization and transfers; no isolated per-kernel timing or speedup
+is inferred. G2/G4/G5 remain CPU HNSW prototypes. G2CUDA/G4CUDA/G5CUDA use a
+separate custom sorted-projection candidate index with GPU distance evaluation;
+the ANN index itself is built on the CPU. Candidate effort is not HNSW `ef`.
+The bounded RTX 4050 pilot found this projection method slower end-to-end than
+exact GPU assignment at the tested N=8192 settings. At low effort its recall
+and objective gap were poor, while small K and effort>=K used explicitly exact
+search. It is a feasibility result, not a performance win. See
+[`docs/IMPLEMENTATION_PLAN_STATUS.md`](docs/IMPLEMENTATION_PLAN_STATUS.md).
+
+O0 compiles `native/kmeans_openmp.cpp` using the installed `g++` and the explicit
+`scripts/build_openmp.sh` command; the runner never compiles code implicitly.
+The real-crop pilot used the same X/C0 and 55 Lloyd updates at 1, 2, 4 and 8
+threads. Four threads were fastest in that single session; eight threads were
+slower than four. This limited run does not establish general CPU scaling.
+
+### Real imagery: required external input, never synthesized
+
+Raw SAFE products are user-provided and gitignored; none are bundled in the
+repository. Fixture JP2 filenames contain synthetic GTiff payloads and must
+never be presented as genuine SAFE evidence. `data/independent_scene_candidates.json`
+records the acquired validation and test products and their checksums. Their
+512×512 crops use the frozen development statistics. Exact K=16, seed=0 CPU/GPU
+reference fits and maps exist for the 31UFU validation crop and 30STG test crop.
+The latest all-method held-out K=16 map set is under
+`outputs/20261025-test-scene-all-method-maps/`; for example,
+`render_G0/true_color.png`, `render_G0/false_color_nir.png`,
+`render_G0/clusters.png` and `render_G0/clusters.tif` show the exact CUDA result.
+The folder also contains the corresponding C0 and approximate/adaptive method
+maps, per-method checksums and provenance. Earlier exact-only maps remain under
+`outputs/20261025-test-scene-k16-exact-cap1000/` and
+`outputs/20261025-validation-scene-k16-exact/`. These output folders are local,
+gitignored artifacts and must be preserved/backed up separately from source.
+The
+test crop has not been used to select or tune adaptive settings; do not use its
+results for tuning. A frozen K=16 test-quality evaluation now covers five seeds
+and one policy: exact C0/G0 reached the declared 5% target in 25/25 fits per
+execution group; Mini-Batch, ANN and adaptive variants missed it by the
+1,000-step cap. CPU and CUDA method groups ran separately, so these results do
+not support cross-device speedup claims. See `data/README.md` and
+`docs/REAL_SCENE_RESULTS.md` for the protocol, per-method results and limits.
+The five-seed summary is reproducible from the saved run archives with
+`experiments/summarize_holdout_quality.py`; its current output is
+`outputs/20261025-test-quality-k16-five-seed-summary-rebuilt/`.
+
+Example after those files exist (replace paths and product directory names):
+
+```bash
+# splits.json maps each input product directory to train/validation/test.
+.venv/bin/python -B scripts/prepare_sentinel2_scenes.py \
+  --raw-dir /path/to/approved/SAFE-products --output-dir outputs/prepared-NEW \
+  --training-scene-id TRAIN_PRODUCT.SAFE --split-manifest /path/to/splits.json \
+  --crop-size 512 --row 2000 --column 2000
+
+MPLCONFIGDIR=/tmp/pcap-mplconfig bash scripts/run_suite_cuda.sh \
+  --scene-dir outputs/prepared-NEW/TRAIN_PRODUCT.SAFE \
+  --methods C0 G0 G1 G2 G3 G4 G5 G3CUDA --k 4 16 --seeds 0 1 2 \
+  --batch-size 256 --max-steps 30 --warmups 2 --repeats 5 \
+  --budget-seconds 120 --save-models --output-dir outputs/real-study-NEW
+
+MPLCONFIGDIR=/tmp/pcap-mplconfig .venv/bin/python -B experiments/plot_results.py \
+  --csv outputs/real-study-NEW/benchmark_results_TIMESTAMP.csv \
+  --output-dir outputs/real-study-NEW/figures
+MPLCONFIGDIR=/tmp/pcap-mplconfig .venv/bin/python -B experiments/summarize_suite.py \
+  --csv outputs/real-study-NEW/benchmark_results_TIMESTAMP.csv \
+  --output-dir outputs/real-study-NEW/scaling
+MPLCONFIGDIR=/tmp/pcap-mplconfig .venv/bin/python -B scripts/render_scene.py \
+  --scene-dir outputs/prepared-NEW/TRAIN_PRODUCT.SAFE \
+  --model-dir outputs/real-study-NEW/models_TIMESTAMP/nN_k4_seed0_G0_rep0 \
+  --output-dir outputs/real-study-NEW/scene-map-NEW
+```
+
+A 120-second budget is checked **between** complete fits and includes runner
+work; use `timeout 150s` for a process limit when appropriate. An outer kill can
+prevent final manifest writing, so the internal limit must be smaller. Failed
+fits/budgets propagate exceptions and save failures/partial measurements; missing
+scenes and hash mismatches fail explicitly. Raw JSONL includes warmups, histories,
+internal timings and hashes; warmups are excluded from measured CSV/statistics.
+The runner rotates method order, retains outliers, and does not establish
+fixed-work equivalence across different algorithms. G0/G1/G3CUDA require actual
+GPU access; no fallback occurs. Output directories must be new for preparation
+and rendering. Timestamped model/results files and SHA256 inventories preserve
+individual runs; no previous experiment directory should be reused for figures.
+
+Models save exact final labels/centroids and JSON histories. Rendering checks
+scene/model hashes and exact assignments, outputs georeferenced `clusters.tif`
+with nodata=-1, and preserves masked/unsampled pixel positions. Display-only
+2–98% stretches produce B04/B03/B02 true-color and B08/B04/B03 false-color PNGs;
+these do not change features. Histories produce adaptive batch/effort plots.
+These are cluster IDs, never independently verified land-cover classes.
+
+The summary utility keeps N/D/K/seed separate and reports median/IQR, individual
+run CSVs, SSE, observations and convergence/cap status. Exact C0/G0 speedups are
+reported only for matching steps/termination and compatible final SSE; they are
+external full-fit ratios. Mini-Batch comparisons require matched quality or
+quality-versus-time curves, not iteration counts. `experiments/benchmark_quality.py`
+provides a separate instrumented time-to-target study: it freezes a target from
+a converged exact CPU reference, performs the same full-data quality checkpoints
+inside each measured fit, and reports capped runs as target misses. Do not pool
+these instrumented timings with the legacy runner timings. Real-data quality
+coverage includes a five-seed validation K sweep and a five-seed held-out K=16
+study, but it is not the full multi-scene N/K matrix. Do not pool capped and
+converged protocols or claim a CPU ANN prototype is a GPU speedup. The OpenMP
+baseline now exists; instructor confirmation that Python-authored CUDA
+satisfies the proposal's C/C++ language requirement remains outstanding.
+
+### New evaluation pilots (25 October 2026)
+
+The final-source projection-ANN feasibility archive is
+`outputs/20261025-projection-feasibility-final/`. It contains 392 raw queries
+(112 warmups and 280 measured) over N=8192, D=4/14 and K=4..256, with two
+warmups per case and five measurements, raw timings, recall/objective gaps, source snapshots, hardware
+conditions and a verified recursive SHA256 inventory. Exact GPU assignment was
+faster end-to-end for all approximate settings in this pilot. The observed
+negative result is recorded; no ANN speedup is claimed.
+
+The real-data quality study is `outputs/20261025-real-quality-256-k16/`:
+65,536 pixels from the existing genuine 31UFS product, D=4, K=16, seed=0,
+two warmups and five measured fits for C0/G0/G1/G2CUDA/G3CUDA/G4CUDA/G5CUDA.
+Its frozen target was 19,583.2966 SSE (5% over the converged exact reference).
+C0 and G0 reached it in all five repeats; the Mini-Batch, ANN and adaptive GPU
+variants reached the 30-step cap without reaching it. See the CSV, raw histories
+and target plot in that directory. This is one quality slice, not a complete
+ablation or held-out result.
+
+The real-data OpenMP archive is `outputs/20261025-openmp-real-maastricht-256/`.
+It contains five measured fits at each requested thread count, 1/2/4/8, two
+warmups, identical inputs and exact outputs (55 steps). Median external O0 fit
+times were 83.57, 54.74, 44.35 and 72.58 ms, respectively; relative to C0 in
+each session these are 1.01x, 1.54x, 1.88x and 1.20x. The 8-thread result shows
+why one short session cannot establish a stable scaling curve.
+
+Reproduce the explicit OpenMP build and runner call with a newly prepared scene:
+
+```bash
+bash scripts/build_openmp.sh
+.venv/bin/python -B experiments/run_suite.py \
+  --scene-dir outputs/prepared-NEW/TRAIN_PRODUCT.SAFE \
+  --methods C0 O0 --omp-threads 4 --k 4 --seeds 0 \
+  --max-steps 200 --warmups 2 --repeats 5 \
+  --output-dir outputs/openmp-real-NEW
+```
+
+Reproduce the quality-study command after a real prepared crop exists:
+
+```bash
+MPLCONFIGDIR=/tmp/pcap-mplconfig timeout 150s bash scripts/run_cuda_python.sh \
+  experiments/benchmark_quality.py \
+  --scene-dir outputs/prepared-NEW/TRAIN_PRODUCT.SAFE \
+  --output-dir outputs/quality-NEW --methods C0 G0 G1 G2CUDA G3CUDA G4CUDA G5CUDA \
+  --k 16 --seeds 0 --policy-json configs/default_policies.json --batch-size 512 \
+  --max-steps 30 --reference-steps 1000 --evaluation-interval 5 \
+  --warmups 2 --repeats 5 --budget-seconds 120
+.venv/bin/python -B experiments/plot_quality.py \
+  --study outputs/quality-NEW --output-dir outputs/quality-NEW/figures
+```
+
+Final regression commands (CUDA failures are errors, not skips):
+
+```bash
+MPLCONFIGDIR=/tmp/pcap-mplconfig .venv/bin/python -B -m pytest tests -q -p no:cacheprovider \
+  --ignore=tests/test_cuda_kmeans.py --ignore=tests/test_cuda_minibatch.py \
+  --ignore=tests/test_cuda_vector_add.py --ignore=tests/test_cuda_adaptive.py \
+  --ignore=tests/test_cuda_ann.py
+MPLCONFIGDIR=/tmp/pcap-mplconfig bash scripts/run_cuda_tests.sh tests -x
+```
+
+## Genuine satellite validation
+
+Three Sentinel-2 L2A products (development 31UFS, validation 31UFU and test
+30STG) have been processed from genuine SAFE/XML/JP2 files. Exact CPU/CUDA,
+Mini-Batch, ANN and adaptive variants ran on real crops and generated
+georeferenced maps. See [real-scene details, artifacts and reproduction](docs/REAL_SCENE_RESULTS.md).
+The frozen policy misses its held-out quality target for Mini-Batch/ANN/adaptive
+variants, and beneficial GPU ANN remains unsupported by the available results.
+
+Additional validation covers the independent 31UFU scene at K=4/8/16/32 with
+five seeds, and the frozen 30STG test protocol covers all twelve methods at
+K=16 (five seeds). Only exact C0/G0 reached the test scene's 5% target (25/25
+fits per execution group); the other methods hit the 1,000-step cap. All twelve
+methods have saved aligned test cluster maps and same-sample unsupervised
+metrics. A separate one-update
+fixed-work study uses genuine nested 31UFS windows with N=1,048,548 and
+4,194,265, D=4/K=16, five seeds and five measured repetitions. Its paired exact
+C0/G0 CPU/GPU ratios were 1.087× and 2.052× in those two sessions; these are
+single-update observations, not convergence or adaptive speedups. See
+[`docs/REAL_SCENE_RESULTS.md`](docs/REAL_SCENE_RESULTS.md) for full tables,
+limitations, archive paths, and commands to reproduce the summary plots.
+
+The completed real-scene time-to-frozen-quality matrix covers valid
+N=262,144 on the validation scene and N=1,048,548/4,194,265 on the development
+scene, at K=4/8/16/32 with five seeds.
+At N≥1,048,548 the quality runs used a 100-update cap; many approximate and
+adaptive methods missed the fixed 5% target, and some exact K=16/32 runs also
+hit the cap. These target misses are retained, not relabeled as convergence or
+speedups. The held-out 30STG quality report remains frozen at K=16; no test-scene
+results were used to retune parameters. See the matrix table and per-run archive
+in [`docs/REAL_SCENE_RESULTS.md`](docs/REAL_SCENE_RESULTS.md).
+
+### Latest verified image and report figures
+
+These are existing, checksum-inventoried local artifacts (not tracked Git
+files). The main visual comparison is
+`outputs/20261024-real-evaluation/real-scene-comparison.png`. The all-method
+held-out cluster maps and RGB/NIR views are in
+`outputs/20261025-test-scene-all-method-maps/render_<METHOD>/` (including
+`clusters.tif`, `clusters.png`, `true_color.png` and `false_color_nir.png`).
+For the latest aggregate quality results, use
+`outputs/20261026-real-quality-matrix-completion/quality_target_hit_rate.png`
+with its `manifest.json` and `individual_runs.csv`. The validation K-sweep
+speedup figure is
+`outputs/20261025-validation-quality-k-sweep-summary-v2/exact_speedup_by_k.png`;
+the five-seed held-out quality-versus-time figures are
+`outputs/20261025-test-quality-k16-five-seed-summary-rebuilt/quality_seed{0..4}_{cpu,cuda}.png`.
+Their protocols differ; do not pool or compare those plots as if they were one
+measurement session. Full interpretation and limitations are in
+[`docs/REAL_SCENE_RESULTS.md`](docs/REAL_SCENE_RESULTS.md).
+
+A separate paired validation-only diagnostic compared the unchanged cumulative-
+count Mini-Batch rule with an experimental decayed-count update on identical
+31UFU K=16 data, initialization, batch-index stream and 5,000-update budget.
+The cumulative run ended at SSE 28,276.14 without reaching the frozen target
+25,614.79; the 10-pass-half-life decayed run first crossed it at checkpoint
+2,100 and ended at 24,703.84. This single result supports cumulative-history
+inertia as a cause for that validation case, but does not establish a generally
+better update rule. The production cumulative-count baseline is unchanged; the
+decayed variant remains experimental and was not evaluated on the untouched
+test scene. Exact methodology, one-run timings, checkpoint metrics, reproduction
+command and verified artifact checksums are in
+[`docs/REAL_SCENE_RESULTS.md`](docs/REAL_SCENE_RESULTS.md). The plan audit and
+prioritized final-submission gates are in
+[`docs/IMPLEMENTATION_PLAN_STATUS.md`](docs/IMPLEMENTATION_PLAN_STATUS.md).
+
+The plan requests kernel-level profiling support, but the WSL Nsight Systems
+installation did not produce a usable trace. Aligned ground-truth land-cover
+labels were not available; cluster IDs are unsupervised and no land-cover
+accuracy is claimed. The instructor scope question for Python-authored CUDA
+versus C/C++ is prepared in [`docs/INSTRUCTOR_CLARIFICATION.md`](docs/INSTRUCTOR_CLARIFICATION.md).
+
+## References and project resources
+
+The following references and official resources are starting points from the
+project plan. Cite a source in the final report only for claims it directly
+supports.
+
+- Pant et al. (2025), project-plan background reference: [DOI 10.3390/a18080532](https://doi.org/10.3390/a18080532).
+- Han and Lee (2024), project-plan background reference: [DOI 10.3390/rs16010102](https://doi.org/10.3390/rs16010102).
+- Li, Frank, and Pfahringer (2023), project-plan background reference: [DOI 10.1007/s10618-022-00869-6](https://doi.org/10.1007/s10618-022-00869-6).
+- Spalding-Jamieson et al. (2025), project-plan background reference: [arXiv:2502.06163](https://arxiv.org/abs/2502.06163).
+- Official implementation/data resources: [Numba-CUDA documentation](https://nvidia.github.io/numba-cuda/), [FAISS K-Means documentation](https://github.com/facebookresearch/faiss/wiki/K%E2%80%90means-clustering), and [Copernicus Browser](https://browser.dataspace.copernicus.eu/).
+
+The instructor scope question remains unanswered; see
+[`docs/INSTRUCTOR_CLARIFICATION.md`](docs/INSTRUCTOR_CLARIFICATION.md). The
+current gate-by-gate status and items needed before final submission are in
+[`docs/IMPLEMENTATION_PLAN_STATUS.md`](docs/IMPLEMENTATION_PLAN_STATUS.md).
+
+### Adaptive V2 confirmation-scene cluster maps
+
+The November 1 confirmation archive stores fit features for a deterministic
+sample of a larger crop. To visualize the saved model across the complete crop,
+run:
+
+```bash
+LD_LIBRARY_PATH=/usr/lib/wsl/lib PYTHONPATH=src NUMBA_ENABLE_CUDASIM=0 \
+  .venv/bin/python -B scripts/render_adaptive_v2_confirmation.py \
+  --study-dir outputs/20261101-independent-confirmation-study \
+  --output-dir outputs/20261102-adaptive-v2-visualization-reproduction
+```
+
+The command reloads the original June 28 SAFE using the archived window,
+calibration and development-fitted standardization. It refuses to render unless
+the reconstructed full-scene mask and sampled feature rows match the saved
+confirmation inputs exactly. It then loads the saved seed-0/repeat-0 Adaptive
+V2 and exact CUDA centroids and assigns every valid crop pixel exactly; it does
+not refit either model. The maps are labeled separately. Their sampled-fit SSE
+remains the archived experiment metric and is distinguished from the diagnostic
+SSE of assigning all crop pixels. GeoTIFFs retain the recorded CRS, transform
+and nodata mask. Outputs and checksums are written only to a new directory; an
+existing output path is rejected. The generated directory contains the paired
+PNG maps, RGB/NIR renderings, aligned cluster GeoTIFFs, provenance and
+`checksums.sha256`.
+The verified generated maps from this run are in
+`outputs/20261102-adaptive-v2-visualization/`; choose another new output
+directory when reproducing because the renderer refuses to overwrite results.

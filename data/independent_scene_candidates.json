@@ -1,0 +1,171 @@
+{
+  "source": "https://catalogue.dataspace.copernicus.eu/odata/v1/Products",
+  "selection_policy": "different AOIs/products; June-July 2024; catalogue cloud <2%; listed size <=1.3GB; no performance-based selection",
+  "candidates": {
+    "validation": {
+      "product_id": "S2B_MSIL2A_20240720T103629_N0510_R008_T31UFU_20240720T121155.SAFE",
+      "catalogue_id": "e2189c10-08c3-4a84-b8da-75e9e8921ca1",
+      "bytes": 776019310,
+      "cloud_percent": 0.098149,
+      "footprint": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              4.806550821680588,
+              52.24688968911669
+            ],
+            [
+              6.071678487044593,
+              52.22256603361336
+            ],
+            [
+              6.141769904481162,
+              53.20820137275637
+            ],
+            [
+              5.231177848559684,
+              53.22593710613668
+            ],
+            [
+              5.222654679141942,
+              53.206672087528965
+            ],
+            [
+              5.158594856920873,
+              53.06116880250536
+            ],
+            [
+              5.094982132516455,
+              52.91565317443057
+            ],
+            [
+              5.031781549151262,
+              52.770127629396505
+            ],
+            [
+              4.968790921354289,
+              52.62452127293108
+            ],
+            [
+              4.905916579178738,
+              52.47886334388048
+            ],
+            [
+              4.843350373482938,
+              52.33318459172591
+            ],
+            [
+              4.806550821680588,
+              52.24688968911669
+            ]
+          ]
+        ]
+      },
+      "status": "acquired_zip_crc_verified_and_safe_extracted",
+      "archive_path": "data/raw/independent-scenes/validation-S2B_MSIL2A_20240720T103629_N0510_R008_T31UFU_20240720T121155.SAFE.zip",
+      "archive_sha256": "ffcbe3a5b6d8f5f528053f3ebe5789e8804cc919300b991e909e0507ee7ce5b8",
+      "metadata_sha256": "44e312c95ad085daab3bfed76ce9361884f30c0a0bc8cc770c9fc0d26fb68fea",
+      "crop_window_10m": [
+        8192,
+        5888,
+        512,
+        512
+      ],
+      "prepared_features_sha256": "82bc1f618ad67db17b6f38d62112d63a24232ca5479552b3ea6d6c1316dc23be",
+      "exact_reference_evaluation": {
+        "output_dir": "outputs/20261025-validation-scene-k16-exact",
+        "methods": [
+          "C0",
+          "G0"
+        ],
+        "n": 262144,
+        "d": 4,
+        "k": 16,
+        "seed": 0,
+        "steps": 138,
+        "termination_reason": "tolerance",
+        "convergence_satisfied": true,
+        "final_exact_sse": {
+          "C0": 24395.034639497884,
+          "G0": 24395.034639497524
+        },
+        "labels_identical": true,
+        "centroids_max_abs_difference": 0.0,
+        "maps": [
+          "render_C0",
+          "render_G0"
+        ]
+      }
+    },
+    "test": {
+      "product_id": "S2A_MSIL2A_20240604T110621_N0510_R137_T30STG_20240604T171851.SAFE",
+      "catalogue_id": "7a6839d6-61f6-447e-a798-7a05eee06114",
+      "bytes": 1217451090,
+      "cloud_percent": 0.237849,
+      "footprint": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              -6.411972478679474,
+              37.8980997878049
+            ],
+            [
+              -6.367413003137115,
+              36.91011916155524
+            ],
+            [
+              -5.136025045841796,
+              36.93866731150362
+            ],
+            [
+              -5.164329841329636,
+              37.92768043331917
+            ],
+            [
+              -6.411972478679474,
+              37.8980997878049
+            ]
+          ]
+        ]
+      },
+      "status": "acquired_zip_crc_verified_and_safe_extracted",
+      "archive_path": "data/raw/independent-scenes/test-S2A_MSIL2A_20240604T110621_N0510_R137_T30STG_20240604T171851.SAFE.zip",
+      "archive_sha256": "87328c3120dc7ec4435693f06bc584e54e227e21a789174b0d87664736258bf5",
+      "metadata_sha256": "25b10a152c5a29d5f8c7e1ee0f6939006fae8db8046dc0b45a8189715529df86",
+      "crop_window_10m": [
+        1280,
+        6144,
+        512,
+        512
+      ],
+      "prepared_features_sha256": "ccff62eb78fd4fdf9a0d44a833a80c9ce3101ba93b12e9798392e396c544d4b2",
+      "exact_reference_evaluation": {
+        "output_dir": "outputs/20261025-test-scene-k16-exact-cap1000",
+        "methods": [
+          "C0",
+          "G0"
+        ],
+        "n": 262144,
+        "d": 4,
+        "k": 16,
+        "seed": 0,
+        "steps": 406,
+        "termination_reason": "tolerance",
+        "convergence_satisfied": true,
+        "final_exact_sse": {
+          "C0": 32485.55251179207,
+          "G0": 32485.552511792142
+        },
+        "labels_identical": true,
+        "centroids_max_abs_difference": 0.0,
+        "maps": [
+          "render_C0",
+          "render_G0"
+        ],
+        "limitation": "One measured fit per method; not a stable runtime comparison."
+      }
+    }
+  }
+}
